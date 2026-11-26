@@ -187,6 +187,33 @@ object SfxSynth {
         return outFile
     }
 
+    /** Human-facing catalogue grouped by how an editor would use each effect. */
+    fun categories(): Map<String, List<SfxType>> = linkedMapOf(
+        "Transitions" to listOf(SfxType.WHOOSH, SfxType.RISER, SfxType.FILM_STOP),
+        "UI & interface" to listOf(SfxType.CLICK, SfxType.TICK, SfxType.POP, SfxType.NOTIFICATION, SfxType.SUCCESS, SfxType.ERROR),
+        "Cinematic" to listOf(SfxType.IMPACT, SfxType.CHIME, SfxType.HEARTBEAT, SfxType.THUNDER, SfxType.WIND, SfxType.RAIN),
+        "Real-world accents" to listOf(SfxType.CAMERA_SHUTTER, SfxType.CROWD_CHEER, SfxType.LAUGHTER),
+        "Creative & gaming" to listOf(SfxType.BUBBLE, SfxType.MAGIC, SfxType.LASER, SfxType.GAME_LEVEL_UP),
+    )
+
+    fun guide(type: SfxType): String = when (type) {
+        SfxType.WHOOSH -> "Use only for a clearly designed motion transition or fast directional movement."
+        SfxType.IMPACT -> "Use sparingly on a strong visual hit, gameplay payoff or deliberate emphasis."
+        SfxType.POP, SfxType.CLICK, SfxType.TICK -> "Use for visible interface actions, taps or precise graphic beats."
+        SfxType.RISER -> "Use before a clear reveal or climax; avoid under dialogue."
+        SfxType.CHIME, SfxType.SUCCESS, SfxType.GAME_LEVEL_UP -> "Use for a positive reveal, completion or achievement."
+        SfxType.ERROR -> "Use only when the visual meaning is failure, warning or error."
+        SfxType.HEARTBEAT -> "Use for deliberate tension or suspense sequences."
+        SfxType.THUNDER, SfxType.RAIN, SfxType.WIND -> "Use only when the scene needs weather ambience; do not mask real location audio."
+        SfxType.CAMERA_SHUTTER -> "Use for a photo-taking moment or camera-themed transition."
+        SfxType.FILM_STOP -> "Use for an intentional freeze, abrupt stop or rewind-style moment."
+        SfxType.NOTIFICATION -> "Use when a notification appears visibly on screen."
+        SfxType.CROWD_CHEER -> "Use for a visible crowd reaction or sports victory."
+        SfxType.LAUGHTER -> "Use only for an intentional comedic beat; never add to normal footage."
+        SfxType.BUBBLE, SfxType.MAGIC -> "Use for playful, whimsical graphics or magical visual moments."
+        SfxType.LASER -> "Use for a visible sci-fi or laser action."
+    }
+
     fun ensureCachedWav(context: Context, type: SfxType): File {
         val dir = File(context.cacheDir, "sfx").apply { mkdirs() }
         val file = File(dir, "sfx_${type.key}.wav")
