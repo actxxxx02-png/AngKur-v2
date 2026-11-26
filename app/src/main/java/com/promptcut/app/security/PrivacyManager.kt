@@ -24,11 +24,11 @@ class PrivacyManager(private val prefs: SharedPreferences) {
     )
 
     var allowFrameSamplingToAi: Boolean
-        get() = prefs.getBoolean(KEY_FRAME_CONSENT, true)
+        get() = prefs.getBoolean(KEY_FRAME_CONSENT, false)
         set(v) = prefs.edit().putBoolean(KEY_FRAME_CONSENT, v).apply()
 
     var allowAudioToGroqStt: Boolean
-        get() = prefs.getBoolean(KEY_AUDIO_STT_CONSENT, true)
+        get() = prefs.getBoolean(KEY_AUDIO_STT_CONSENT, false)
         set(v) = prefs.edit().putBoolean(KEY_AUDIO_STT_CONSENT, v).apply()
 
     var allowFullVideoUpload: Boolean

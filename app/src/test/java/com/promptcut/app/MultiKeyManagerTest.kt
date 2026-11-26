@@ -339,8 +339,27 @@ class MultiKeyManagerTest {
     }
 
     @Test
+    fun groqWhisperTranscription_blockedByDefaultWithoutOptIn() = runTest {
+        val settings = newSettings()
+        val router = ProviderRouter(settings, nowMsProvider = { fakeNowMs }, retryBackoffBaseMs = 0L)
+        settings.keyManager.addKey(ProviderId.GROQ, "Q1", "gsk_SttGoodKey1111111111", setPreferred = true)
+
+        val dummyAudio = File(context.cacheDir, "dummy_blocked.m4a").apply { writeText("audio") }
+        var called = false
+        val res = router.transcribeAudioWithGroq(dummyAudio) { _, _ ->
+            called = true
+            emptyList()
+        }
+        assertFalse(called)
+        assertTrue(res is AppResult.Failure)
+        assertTrue((res as AppResult.Failure).error is AppError.PrivacyBlocked)
+        dummyAudio.delete()
+    }
+
+    @Test
     fun groqWhisperTranscription_rotatesAcrossGroqKeys() = runTest {
         val settings = newSettings()
+        settings.privacy.allowAudioToGroqStt = true
         val router = ProviderRouter(settings, nowMsProvider = { fakeNowMs }, retryBackoffBaseMs = 0L)
         val q1 = settings.keyManager.addKey(ProviderId.GROQ, "Q1", "gsk_SttFailKey1111111111", setPreferred = true).getOrNull()!!
         val q2 = settings.keyManager.addKey(ProviderId.GROQ, "Q2", "gsk_SttGoodKey2222222222").getOrNull()!!

@@ -230,7 +230,9 @@ class ProjectRepository(private val db: AppDatabase) {
     fun saveProjectThumbnail(context: Context, projectId: String, bitmap: Bitmap): String? {
         return runCatching {
             val dir = File(context.filesDir, "thumbnails").apply { mkdirs() }
-            val file = File(dir, "$projectId.jpg")
+            val safeId = projectId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifBlank { "project" }
+            val file = File(dir, "$safeId.jpg")
+            require(file.canonicalPath.startsWith(dir.canonicalPath + File.separator))
             val scaled = Bitmap.createScaledBitmap(bitmap, 240, (240 * bitmap.height / bitmap.width.coerceAtLeast(1)).coerceIn(80, 426), true)
             file.outputStream().use { os ->
                 scaled.compress(Bitmap.CompressFormat.JPEG, 82, os)

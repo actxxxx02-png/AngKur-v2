@@ -90,7 +90,7 @@ import com.promptcut.app.ui.theme.PromptCutTheme
  * Publication note: enable GitHub Pages (or host docs/privacy-policy.html on a custom HTTPS page)
  * before Google Play Store submission.
  */
-const val PRIVACY_POLICY_URL = "https://github.com/danieldevloper00-tech/promptCut/blob/main/docs/privacy-policy.html"
+const val PRIVACY_POLICY_URL = "https://github.com/danieldevloper00-tech/AngKur-v2/blob/main/docs/privacy-policy.html"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -346,15 +346,17 @@ fun EditorScreen(vm: EditorViewModel) {
                             onShare = {
                                 vm.saveToGallery { uri ->
                                     if (uri != null) {
-                                        ctx.startActivity(
-                                            Intent.createChooser(
-                                                Intent(Intent.ACTION_SEND).setType("video/mp4")
-                                                    .putExtra(Intent.EXTRA_STREAM, uri)
-                                                    .apply { vm.shareCredit?.let { putExtra(Intent.EXTRA_TEXT, it) } }
-                                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                                                "Share Video",
+                                        runCatching {
+                                            ctx.startActivity(
+                                                Intent.createChooser(
+                                                    Intent(Intent.ACTION_SEND).setType("video/mp4")
+                                                        .putExtra(Intent.EXTRA_STREAM, uri)
+                                                        .apply { vm.shareCredit?.let { putExtra(Intent.EXTRA_TEXT, it) } }
+                                                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                                                    "Share Video",
+                                                )
                                             )
-                                        )
+                                        }
                                     }
                                 }
                             },

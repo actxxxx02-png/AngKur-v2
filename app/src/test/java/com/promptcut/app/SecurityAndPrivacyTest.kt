@@ -112,4 +112,46 @@ class SecurityAndPrivacyTest {
         val sttBlocked = pm.validateRequest(ProviderId.GROQ, frameCount = 0, isSpeechToText = true)
         assertTrue(sttBlocked is AppResult.Failure)
     }
+
+    @Test
+    fun privacyManager_freshInstallDefaultsOptInFalseAndPreservesSavedUpgradePrefs() {
+        val freshPm = PrivacyManager(prefs)
+        assertFalse(freshPm.allowFrameSamplingToAi)
+        assertFalse(freshPm.allowAudioToGroqStt)
+        assertFalse(freshPm.allowFullVideoUpload)
+        assertFalse(freshPm.claudePaidConsentGranted)
+
+        val framesAudit = freshPm.validateRequest(ProviderId.GEMINI, frameCount = 6).getOrNull()!!
+        assertEquals(0, framesAudit.sendsSampledFrames)
+
+        val sttDefaultBlocked = freshPm.validateRequest(ProviderId.GROQ, frameCount = 0, isSpeechToText = true)
+        assertTrue(sttDefaultBlocked is AppResult.Failure)
+        assertTrue((sttDefaultBlocked as AppResult.Failure).error is AppError.PrivacyBlocked)
+
+        // Simulate upgrade where existing user had previously opted into frames & STT
+        prefs.edit()
+            .putBoolean("privacy_allow_frames", true)
+            .putBoolean("privacy_allow_stt", true)
+            .commit()
+        val upgradedPm = PrivacyManager(prefs)
+        assertTrue(upgradedPm.allowFrameSamplingToAi)
+        assertTrue(upgradedPm.allowAudioToGroqStt)
+        assertEquals(6, upgradedPm.validateRequest(ProviderId.GEMINI, frameCount = 6).getOrNull()!!.sendsSampledFrames)
+        assertTrue(upgradedPm.validateRequest(ProviderId.GROQ, frameCount = 0, isSpeechToText = true) is AppResult.Success)
+    }
+
+    @Test
+    fun musicLibrary_rejectsNonHttpsAndSanitizesTrackFilenames() {
+        val badHttp = runCatching { MusicLibrary.validateHttpsUrl("http://example.com/song.mp3") }
+        assertTrue(badHttp.isFailure)
+        val badFile = runCatching { MusicLibrary.validateHttpsUrl("file:///etc/passwd") }
+        assertTrue(badFile.isFailure)
+        val okHttps = MusicLibrary.validateHttpsUrl("https://cdn.openverse.org/audio/track.mp3")
+        assertEquals("https", okHttps.protocol)
+
+        val safeName = MusicLibrary.safeCacheFileName("../../evil/track?name=1")
+        assertFalse(safeName.contains(".."))
+        assertFalse(safeName.contains("/"))
+        assertTrue(safeName.endsWith(".audio"))
+    }
 }

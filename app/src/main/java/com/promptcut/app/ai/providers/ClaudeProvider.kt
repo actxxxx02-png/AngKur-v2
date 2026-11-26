@@ -176,8 +176,17 @@ class ClaudeProvider(
     }
 
     private fun buildPayload(model: String, request: AiRequest, stream: Boolean): JSONObject {
+        val sysParts = mutableListOf<String>()
+        if (request.systemPrompt.isNotBlank()) sysParts += request.systemPrompt.trim()
+        request.messages.filter { it.role == AiRole.SYSTEM && it.content.isNotBlank() }
+            .forEach { sysParts += it.content.trim() }
+
         val msgs = JSONArray()
+        val lastUserIdx = request.messages.indexOfLast { it.role == AiRole.USER }
+        var attachedFrames = false
+
         request.messages.forEachIndexed { idx, m ->
+            if (m.role == AiRole.SYSTEM) return@forEachIndexed
             val content = JSONArray()
             if (m.role == AiRole.TOOL) {
                 content.put(
@@ -199,22 +208,9 @@ class ClaudeProvider(
                             .put("input", runCatching { JSONObject(tc.argumentsJson) }.getOrElse { JSONObject() })
                     )
                 }
-                val isLastUser = m.role == AiRole.USER && idx == request.messages.indexOfLast { it.role == AiRole.USER }
-                if (isLastUser && request.frames.isNotEmpty()) {
-                    request.frames.take(capabilities.maxFrames).forEach { f ->
-                        content.put(JSONObject().put("type", "text").put("text", f.label))
-                        content.put(
-                            JSONObject()
-                                .put("type", "image")
-                                .put(
-                                    "source",
-                                    JSONObject()
-                                        .put("type", "base64")
-                                        .put("media_type", "image/jpeg")
-                                        .put("data", Base64.encodeToString(f.jpeg, Base64.NO_WRAP)),
-                                )
-                        )
-                    }
+                if (m.role == AiRole.USER && idx == lastUserIdx && request.frames.isNotEmpty()) {
+                    appendFrameBlocks(content, request)
+                    attachedFrames = true
                 }
             }
             val role = if (m.role == AiRole.ASSISTANT) "assistant" else "user"
@@ -223,10 +219,17 @@ class ClaudeProvider(
             }
         }
 
+        if (!attachedFrames && request.frames.isNotEmpty()) {
+            val content = JSONArray()
+            appendFrameBlocks(content, request)
+            msgs.put(JSONObject().put("role", "user").put("content", content))
+        }
+
         val sys = buildString {
-            append(request.systemPrompt)
+            append(sysParts.joinToString("\n\n"))
             if (request.jsonMode && request.tools.isEmpty()) {
-                append("\n\nReturn ONLY a valid JSON object without markdown fences or extra commentary.")
+                if (isNotBlank()) append("\n\n")
+                append("Return ONLY a valid JSON object without markdown fences or extra commentary.")
             }
         }
 
@@ -240,16 +243,37 @@ class ClaudeProvider(
         if (request.tools.isNotEmpty()) {
             val tools = JSONArray()
             request.tools.forEach { t ->
+                require(t.name.isNotBlank()) { "Tool declaration name must not be blank." }
+                val schema = GeminiProvider.parseStrictToolSchema(t.name, t.parametersJsonSchema)
                 tools.put(
                     JSONObject()
                         .put("name", t.name)
                         .put("description", t.description)
-                        .put("input_schema", runCatching { JSONObject(t.parametersJsonSchema) }.getOrElse { JSONObject() })
+                        .put("input_schema", schema)
                 )
             }
             payload.put("tools", tools)
         }
         return payload
+    }
+
+    private fun appendFrameBlocks(content: JSONArray, request: AiRequest) {
+        request.frames.take(capabilities.maxFrames).forEach { f ->
+            if (f.label.isNotBlank()) {
+                content.put(JSONObject().put("type", "text").put("text", f.label))
+            }
+            content.put(
+                JSONObject()
+                    .put("type", "image")
+                    .put(
+                        "source",
+                        JSONObject()
+                            .put("type", "base64")
+                            .put("media_type", "image/jpeg")
+                            .put("data", Base64.encodeToString(f.jpeg, Base64.NO_WRAP)),
+                    )
+            )
+        }
     }
 
     private fun parseResponse(raw: String, model: String): AiResponse {
@@ -258,7 +282,7 @@ class ClaudeProvider(
         val sb = StringBuilder()
         val tcs = mutableListOf<AiToolCall>()
         for (i in 0 until content.length()) {
-            val block = content.getJSONObject(i)
+            val block = content.optJSONObject(i) ?: continue
             when (block.optString("type")) {
                 "text" -> sb.append(block.optString("text", ""))
                 "tool_use" -> tcs += AiToolCall(

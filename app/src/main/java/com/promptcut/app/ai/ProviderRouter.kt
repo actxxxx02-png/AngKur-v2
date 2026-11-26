@@ -353,6 +353,10 @@ class ProviderRouter(
         var lastError: AppError? = null
 
         for (providerId in order) {
+            if (providerId == ProviderId.CLAUDE && !settings.privacy.claudePaidConsentGranted) {
+                emit(AiStreamEvent.Error(AppError.PaidConsentRequired("Anthropic Claude")))
+                return@flow
+            }
             val privacyCheck = settings.privacy.validateRequest(
                 provider = providerId,
                 frameCount = if (providerFor(providerId).capabilities.supportsVision) request.frames.size else 0,
@@ -379,40 +383,55 @@ class ProviderRouter(
                 var completed = false
                 var rotatableError: AppError? = null
                 var terminalError: AppError? = null
+                var attempt = 0
 
-                providerFor(providerId).stream(rawKey, keyRecord.activeModel ?: settings.modelFor(providerId), safeReq)
-                    .collect { ev ->
-                        when (ev) {
-                            is AiStreamEvent.Delta, is AiStreamEvent.ToolCallReady -> {
-                                emittedOutput = true
-                                emit(ev)
-                            }
-                            is AiStreamEvent.Completed -> {
-                                completed = true
-                                settings.keyManager.markWorking(
-                                    keyId = keyRecord.id,
-                                    model = ev.response.model,
-                                    usedNow = true,
-                                    testSucceededNow = false,
-                                    nowMs = nowMsProvider(),
-                                )
-                                settings.setModelFor(providerId, ev.response.model)
-                                ev.response.usage?.let { settings.recordUsage(it.inputTokens, it.outputTokens) }
-                                emit(ev)
-                            }
-                            is AiStreamEvent.Error -> {
-                                settings.keyManager.recordFailure(keyRecord.id, ev.error, nowMsProvider())
-                                val canRotate = !emittedOutput && (
-                                    ev.error is AppError.Auth ||
-                                        ev.error is AppError.RateLimit ||
-                                        ev.error is AppError.QuotaExhausted ||
-                                        ev.error is AppError.ProviderUnavailable
+                while (true) {
+                    var retry5xx = false
+                    rotatableError = null
+                    terminalError = null
+
+                    providerFor(providerId).stream(rawKey, keyRecord.activeModel ?: settings.modelFor(providerId), safeReq)
+                        .collect { ev ->
+                            when (ev) {
+                                is AiStreamEvent.Delta, is AiStreamEvent.ToolCallReady -> {
+                                    emittedOutput = true
+                                    emit(ev)
+                                }
+                                is AiStreamEvent.Completed -> {
+                                    completed = true
+                                    settings.keyManager.markWorking(
+                                        keyId = keyRecord.id,
+                                        model = ev.response.model,
+                                        usedNow = true,
+                                        testSucceededNow = false,
+                                        nowMs = nowMsProvider(),
                                     )
-                                if (canRotate) rotatableError = ev.error
-                                else terminalError = ev.error
+                                    settings.setModelFor(providerId, ev.response.model)
+                                    ev.response.usage?.let { settings.recordUsage(it.inputTokens, it.outputTokens) }
+                                    emit(ev)
+                                }
+                                is AiStreamEvent.Error -> {
+                                    if (!emittedOutput && ev.error is AppError.ProviderUnavailable && attempt < MAX_5XX_RETRIES) {
+                                        attempt++
+                                        retry5xx = true
+                                    } else {
+                                        settings.keyManager.recordFailure(keyRecord.id, ev.error, nowMsProvider())
+                                        val canRotate = !emittedOutput && (
+                                            ev.error is AppError.Auth ||
+                                                ev.error is AppError.RateLimit ||
+                                                ev.error is AppError.QuotaExhausted ||
+                                                ev.error is AppError.ProviderUnavailable
+                                            )
+                                        if (canRotate) rotatableError = ev.error
+                                        else terminalError = ev.error
+                                    }
+                                }
                             }
                         }
-                    }
+
+                    if (completed || terminalError != null || rotatableError != null || !retry5xx) break
+                    if (retryBackoffBaseMs > 0L) delay(retryBackoffBaseMs * attempt)
+                }
 
                 if (completed) return@flow
                 if (terminalError != null) {

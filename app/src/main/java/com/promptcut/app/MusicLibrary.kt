@@ -86,14 +86,16 @@ object MusicLibrary {
         }
         val results = JSONObject(json).optJSONArray("results") ?: return emptyList()
         return (0 until results.length()).mapNotNull { i ->
-            val r = results.getJSONObject(i)
+            val r = results.optJSONObject(i) ?: return@mapNotNull null
             val type = r.optString("filetype").lowercase()
             if (type.isNotBlank() && type !in playable) return@mapNotNull null
             val durMs = r.optLong("duration", 0)
             val lic = r.optString("license").uppercase().let { l ->
                 if (l == "CC0" || l == "PDM") l else "CC ${l} ${r.optString("license_version")}".trim()
             }
-            val genres = r.optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.getString(it) } }.orEmpty()
+            val genres = r.optJSONArray("genres")?.let { g ->
+                (0 until g.length()).mapNotNull { idx -> g.optString(idx).takeIf { it.isNotBlank() } }
+            }.orEmpty()
             LibraryTrack(
                 id = r.optString("id"),
                 title = r.optString("title").replace(Regex("\\.(wav|mp3|flac|ogg|aiff?|m4a)$", RegexOption.IGNORE_CASE), "").ifBlank { "Untitled" },
@@ -103,13 +105,29 @@ object MusicLibrary {
                 license = lic,
                 attribution = r.optString("attribution"),
                 genres = genres,
-            ).takeIf { it.url.startsWith("http") }
+            ).takeIf { it.url.startsWith("https://", ignoreCase = true) }
         }
+    }
+
+    internal fun safeCacheFileName(trackId: String): String {
+        val sanitized = trackId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(36).ifBlank { "track" }
+        return "$sanitized.audio"
+    }
+
+    internal fun validateHttpsUrl(rawUrl: String): URL {
+        val u = runCatching { URL(rawUrl) }.getOrElse {
+            throw ApiException("Invalid music URL.", 400)
+        }
+        if (!u.protocol.equals("https", ignoreCase = true) || u.host.isNullOrBlank()) {
+            throw ApiException("Only secure HTTPS music URLs are allowed.", 400)
+        }
+        return u
     }
 
     suspend fun download(context: Context, t: LibraryTrack): File = withContext(Dispatchers.IO) {
         val dir = File(context.cacheDir, "songs").apply { mkdirs() }
-        val f = File(dir, "${t.id.take(36)}.audio")
+        val f = File(dir, safeCacheFileName(t.id))
+        require(f.canonicalPath.startsWith(dir.canonicalPath + File.separator)) { "Invalid track cache path." }
         if (f.exists() && f.length() > 10_000) return@withContext f
         val conn = open(t.url)
         try {
@@ -137,7 +155,7 @@ object MusicLibrary {
     }
 
     private fun open(url: String): HttpURLConnection {
-        var u = URL(url)
+        var u = validateHttpsUrl(url)
         repeat(5) {
             val c = (u.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
@@ -146,7 +164,14 @@ object MusicLibrary {
             }
             if (c.responseCode in 300..399) {
                 val loc = c.getHeaderField("Location") ?: return c
-                c.disconnect(); u = URL(u, loc)
+                c.disconnect()
+                val next = runCatching { URL(u, loc) }.getOrElse {
+                    throw ApiException("Invalid music redirect URL.", 400)
+                }
+                if (!next.protocol.equals("https", ignoreCase = true) || next.host.isNullOrBlank()) {
+                    throw ApiException("Blocked insecure music redirect.", 400)
+                }
+                u = next
             } else return c
         }
         throw ApiException("Too many redirects.")

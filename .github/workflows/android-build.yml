@@ -1,0 +1,154 @@
+name: Android Build & APK Delivery
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_package:
+    name: Test, Build & Package APKs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle packages and wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Validate Gradle wrapper
+        run: |
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.properties
+          test -f gradle/wrapper/gradle-wrapper.jar
+          chmod +x gradlew
+          ./gradlew --version --no-daemon
+
+      - name: Run unit and Robolectric tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --no-daemon
+
+      - name: Prepare conditional release signing configuration
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+            KEYSTORE_PATH="$RUNNER_TEMP/upload-release.jks"
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            test -s "$KEYSTORE_PATH"
+            {
+              printf 'storeFile=%s\n' "$KEYSTORE_PATH"
+              printf 'storePassword=%s\n' "$RELEASE_STORE_PASSWORD"
+              printf 'keyAlias=%s\n' "$RELEASE_KEY_ALIAS"
+              printf 'keyPassword=%s\n' "$RELEASE_KEY_PASSWORD"
+            } > keystore.properties
+            echo "RELEASE_SIGNED=true" >> "$GITHUB_ENV"
+            echo "Release signing secrets detected: using upload keystore."
+          else
+            rm -f keystore.properties
+            echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+            echo "Release signing secrets not configured: release APK will fall back to debug keystore (verification only)."
+          fi
+
+      - name: Build Debug and Release APKs
+        run: ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
+
+      - name: Verify APKs and stage predictable deliverables
+        run: |
+          DEBUG_SRC="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_SRC="app/build/outputs/apk/release/app-release.apk"
+
+          test -s "$DEBUG_SRC"
+          test -s "$RELEASE_SRC"
+
+          mkdir -p build/apk-deliverables
+          cp "$DEBUG_SRC" build/apk-deliverables/PromptCut-debug.apk
+          cp "$RELEASE_SRC" build/apk-deliverables/PromptCut-release.apk
+
+          DEBUG_BYTES=$(wc -c < build/apk-deliverables/PromptCut-debug.apk)
+          RELEASE_BYTES=$(wc -c < build/apk-deliverables/PromptCut-release.apk)
+          DEBUG_SHA=$(sha256sum build/apk-deliverables/PromptCut-debug.apk | awk '{print $1}')
+          RELEASE_SHA=$(sha256sum build/apk-deliverables/PromptCut-release.apk | awk '{print $1}')
+
+          {
+            echo "DEBUG_BYTES=$DEBUG_BYTES"
+            echo "RELEASE_BYTES=$RELEASE_BYTES"
+            echo "DEBUG_SHA=$DEBUG_SHA"
+            echo "RELEASE_SHA=$RELEASE_SHA"
+          } >> "$GITHUB_ENV"
+
+      - name: Clean up ephemeral signing files
+        if: always()
+        run: rm -f keystore.properties "$RUNNER_TEMP/upload-release.jks"
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PromptCut-Test-Reports
+          path: app/build/reports/tests/
+          retention-days: 14
+
+      - name: Upload Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PromptCut-Debug-APK
+          path: build/apk-deliverables/PromptCut-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PromptCut-Release-APK
+          path: build/apk-deliverables/PromptCut-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write GitHub Step Summary
+        if: always()
+        run: |
+          {
+            echo "## PromptCut Build & APK Delivery"
+            echo ""
+            echo "- **Branch / Ref:** \`${{ github.ref_name }}\`"
+            echo "- **Commit:** \`${{ github.sha }}\`"
+            if [ "${{ env.RELEASE_SIGNED }}" = "true" ]; then
+              echo "- **Release Signing:** Signed with configured upload keystore (\`RELEASE_KEYSTORE_BASE64\`)"
+            else
+              echo "- **Release Signing:** Unsigned for Play Store — fell back to \`debug.keystore\` (local/device verification only)"
+            fi
+            echo ""
+            echo "| Deliverable | Artifact Name | Size (bytes) | SHA-256 |"
+            echo "|---|---|---|---|"
+            echo "| \`PromptCut-debug.apk\` | \`PromptCut-Debug-APK\` | ${DEBUG_BYTES:-N/A} | \`${DEBUG_SHA:-N/A}\` |"
+            echo "| \`PromptCut-release.apk\` | \`PromptCut-Release-APK\` | ${RELEASE_BYTES:-N/A} | \`${RELEASE_SHA:-N/A}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

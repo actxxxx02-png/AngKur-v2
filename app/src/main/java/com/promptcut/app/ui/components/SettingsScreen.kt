@@ -245,7 +245,9 @@ fun SettingsScreen(
             Text("Manage ${selectedProvider.shortName} Keys (${providerKeys.size})", style = MaterialTheme.typography.titleSmall)
 
             OutlinedButton(
-                onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(selectedProvider.keyPageUrl))) },
+                onClick = {
+                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(selectedProvider.keyPageUrl))) }
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Open ${selectedProvider.shortName} Key Console") }
 
@@ -582,8 +584,26 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            TextButton(onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }) {
+            TextButton(onClick = {
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_POLICY_URL))) }
+            }) {
                 Text("Full Privacy Policy")
+            }
+
+            HorizontalDivider()
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "About PromptCut",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        "PromptCut v1.0.0 · Developed by Angkur",
+                        style = MonoTimecodeStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("developer_attribution"),
+                    )
+                }
             }
         }
     }

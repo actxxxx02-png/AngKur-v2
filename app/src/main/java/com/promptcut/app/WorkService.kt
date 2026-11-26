@@ -44,7 +44,8 @@ class WorkService : Service() {
             if (Build.VERSION.SDK_INT >= 33 &&
                 ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) return
-            NotificationManagerCompat.from(ctx).notify(ID, build(ctx, text, progress))
+            ensureChannel(ctx)
+            runCatching { NotificationManagerCompat.from(ctx).notify(ID, build(ctx, text, progress)) }
         }
 
         fun stop(ctx: Context) {
@@ -57,8 +58,7 @@ class WorkService : Service() {
             if (Build.VERSION.SDK_INT >= 33 &&
                 ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) return
-            val nm = ctx.getSystemService(NotificationManager::class.java)
-            nm?.createNotificationChannel(NotificationChannel(CHANNEL, "Editing progress", NotificationManager.IMPORTANCE_LOW))
+            ensureChannel(ctx)
             val notif = NotificationCompat.Builder(ctx, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_cut)
                 .setContentTitle(title)
@@ -71,7 +71,14 @@ class WorkService : Service() {
                     )
                 )
                 .build()
-            NotificationManagerCompat.from(ctx).notify(ID + 1, notif)
+            runCatching { NotificationManagerCompat.from(ctx).notify(ID + 1, notif) }
+        }
+
+        private fun ensureChannel(ctx: Context) {
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            nm?.createNotificationChannel(
+                NotificationChannel(CHANNEL, "Editing progress", NotificationManager.IMPORTANCE_LOW)
+            )
         }
 
         private fun build(ctx: Context, text: String, progress: Int) =
@@ -93,8 +100,7 @@ class WorkService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Editing progress", NotificationManager.IMPORTANCE_LOW))
+        ensureChannel(this)
         val type = when {
             Build.VERSION.SDK_INT >= 35 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
             else -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -111,6 +117,11 @@ class WorkService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) {
         running = false
         stopSelf()
+    }
+
+    override fun onDestroy() {
+        running = false
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

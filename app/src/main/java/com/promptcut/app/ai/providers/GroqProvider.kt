@@ -47,7 +47,9 @@ class GroqProvider : AiProvider {
             providerName = "Groq",
         )
         val data = JSONObject(json).optJSONArray("data") ?: JSONArray()
-        val ids = (0 until data.length()).map { data.getJSONObject(it).getString("id") }
+        val ids = (0 until data.length()).mapNotNull {
+            data.optJSONObject(it)?.optString("id")?.takeIf { id -> id.isNotBlank() }
+        }
         ModelPicker.groqRanked(ids)
     }
 
@@ -64,7 +66,15 @@ class GroqProvider : AiProvider {
             val rankedFn: suspend () -> List<String> = {
                 when (val res = listModels(apiKey)) {
                     is AppResult.Success -> res.value
-                    is AppResult.Failure -> throw ApiException(res.error.message)
+                    is AppResult.Failure -> throw when (val e = res.error) {
+                        is AppError.Auth -> ApiException(e.message, e.httpCode, e.detail)
+                        is AppError.RateLimit -> ApiException(e.message, e.httpCode, e.detail)
+                        is AppError.QuotaExhausted -> ApiException(e.message, e.httpCode, e.detail)
+                        is AppError.ProviderUnavailable -> ApiException(e.message, e.httpCode, e.detail)
+                        is AppError.Network -> java.io.IOException(e.message)
+                        is AppError.Timeout -> java.net.SocketTimeoutException(e.message)
+                        else -> ApiException(e.message, 422, e.detail)
+                    }
                 }
             }
             var finalResp: AiResponse? = null
@@ -226,6 +236,8 @@ class GroqProvider : AiProvider {
         if (request.tools.isNotEmpty()) {
             val tools = JSONArray()
             request.tools.forEach { t ->
+                require(t.name.isNotBlank()) { "Tool declaration name must not be blank." }
+                val schema = GeminiProvider.parseStrictToolSchema(t.name, t.parametersJsonSchema)
                 tools.put(
                     JSONObject()
                         .put("type", "function")
@@ -234,7 +246,7 @@ class GroqProvider : AiProvider {
                             JSONObject()
                                 .put("name", t.name)
                                 .put("description", t.description)
-                                .put("parameters", runCatching { JSONObject(t.parametersJsonSchema) }.getOrElse { JSONObject() })
+                                .put("parameters", schema)
                         )
                 )
             }
@@ -245,7 +257,8 @@ class GroqProvider : AiProvider {
 
     private fun parseResponse(raw: String, model: String): AiResponse {
         val root = JSONObject(raw)
-        val msg = root.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+        val msg = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+            ?: throw ApiException("Groq returned no choices.", 422)
         val text = msg.optString("content", "")
         val tcs = mutableListOf<AiToolCall>()
         val tcArr = msg.optJSONArray("tool_calls")

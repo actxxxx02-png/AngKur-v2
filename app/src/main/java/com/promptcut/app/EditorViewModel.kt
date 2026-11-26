@@ -40,6 +40,7 @@ import com.promptcut.app.render.ExportSettings
 import com.promptcut.app.render.RenderJobState
 import com.promptcut.app.render.RenderJobStatus
 import com.promptcut.app.render.RenderJobStore
+import com.promptcut.app.security.KeyVault
 import com.promptcut.app.timeline.AudioClipItem
 import com.promptcut.app.timeline.AudioTrackType
 import com.promptcut.app.timeline.CaptionAnimation
@@ -820,7 +821,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                status = "Couldn't get style ideas: ${e.message}. You can still edit directly."
+                val safeMsg = KeyVault.redactSecrets(e.message ?: "unknown error", settings.allConfiguredKeys())
+                status = "Couldn't get style ideas: $safeMsg. You can still edit directly."
             } finally {
                 analyzing = false
             }
@@ -917,7 +919,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 libResults.clear(); libResults += found
             } catch (e: Exception) {
-                libError = e.message
+                libError = KeyVault.redactSecrets(e.message ?: "Music search failed.", settings.allConfiguredKeys())
             } finally {
                 libSearching = false
             }
@@ -945,7 +947,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 attachSongToTimeline(s)
                 libError = null
             } catch (e: Exception) {
-                libError = e.message
+                libError = KeyVault.redactSecrets(e.message ?: "Couldn't load track.", settings.allConfiguredKeys())
             }
         }
     }
@@ -1135,7 +1137,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                chat += ChatMessage(false, e.message ?: "Something went wrong.", true)
+                val safeMsg = KeyVault.redactSecrets(e.message ?: "Something went wrong.", settings.allConfiguredKeys())
+                chat += ChatMessage(false, safeMsg, true)
                 status = null
             } finally {
                 busy = false
@@ -1154,7 +1157,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                chat += ChatMessage(false, e.message ?: "Export failed.", true)
+                val safeMsg = KeyVault.redactSecrets(e.message ?: "Export failed.", settings.allConfiguredKeys())
+                chat += ChatMessage(false, safeMsg, true)
             } finally {
                 busy = false
                 progress = -1

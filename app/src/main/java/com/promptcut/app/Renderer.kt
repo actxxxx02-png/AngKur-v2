@@ -284,12 +284,12 @@ object Renderer {
                 return ExportVerificationResult(false, false, hasAudio, durationMs, width, height, file.length(), "Rendered MP4 contains no video track.")
             }
             if (durationMs <= 100L) {
-                val r = MediaMetadataRetriever()
                 runCatching {
-                    r.setDataSource(file.absolutePath)
-                    durationMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: durationMs
+                    MediaMetadataRetriever().use { r ->
+                        r.setDataSource(file.absolutePath)
+                        durationMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: durationMs
+                    }
                 }
-                r.release()
             }
             if (expectAudio && !hasAudio) {
                 Log.w(TAG, "Verified MP4 missing optional audio track")
@@ -835,11 +835,18 @@ object Renderer {
             put(MediaStore.Video.Media.IS_PENDING, 1)
         }
         val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            ?: throw Exception("Couldn't create a file in your gallery.")
-        resolver.openOutputStream(uri)!!.use { os -> file.inputStream().use { it.copyTo(os) } }
-        values.clear()
-        values.put(MediaStore.Video.Media.IS_PENDING, 0)
-        resolver.update(uri, values, null, null)
-        uri
+            ?: throw RenderException("Couldn't create a file in your gallery.")
+        try {
+            val os = resolver.openOutputStream(uri)
+                ?: throw RenderException("Couldn't open gallery output stream.")
+            os.use { out -> file.inputStream().use { it.copyTo(out) } }
+            values.clear()
+            values.put(MediaStore.Video.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            uri
+        } catch (t: Throwable) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw t
+        }
     }
 }

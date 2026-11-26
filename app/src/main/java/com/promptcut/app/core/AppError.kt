@@ -166,6 +166,8 @@ sealed class AppError(
                 Render(t.message ?: "Video rendering failed.", cause = t)
             is com.promptcut.app.PlanException ->
                 Validation(t.message ?: "Invalid edit plan.", cause = t)
+            is IllegalArgumentException ->
+                Validation(KeyVault.redactSecrets(t.message ?: "Invalid request parameters."), cause = t)
             else -> Unknown(KeyVault.redactSecrets(t.message ?: "Unexpected error."), cause = t)
         }
     }

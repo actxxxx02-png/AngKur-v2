@@ -313,20 +313,22 @@ object MusicMux {
     fun decodeToFile(context: Context, uri: Uri, startSec: Double, maxSec: Double, out: File): Long {
         val ex = MediaExtractor()
         var codec: MediaCodec? = null
-        val os = out.outputStream().buffered(1 shl 16)
+        var os: java.io.BufferedOutputStream? = null
         var written = 0L
         try {
             ex.setDataSource(context, uri, null)
             val track = (0 until ex.trackCount).firstOrNull {
                 ex.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
             } ?: return 0
+            os = out.outputStream().buffered(1 shl 16)
             ex.selectTrack(track)
             val fmt = ex.getTrackFormat(track)
             val startUs = (startSec * 1_000_000).toLong()
             val endUs = startUs + (maxSec * 1_000_000).toLong()
             val maxFrames = (maxSec * SR).toLong()
             if (startUs > 0) ex.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-            codec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME)!!)
+            val mime = fmt.getString(MediaFormat.KEY_MIME) ?: return 0
+            codec = MediaCodec.createDecoderByType(mime)
             codec.configure(fmt, null, null, 0)
             codec.start()
 
@@ -376,13 +378,13 @@ object MusicMux {
                     val rs = resampler ?: Resampler(channels.coerceAtLeast(1), rate, SR).also { resampler = it }
                     rs.feed(tmp, n) { l, r ->
                         if (written < maxFrames) {
-                            if (outBytes.remaining() < 4) { os.write(outBytes.array(), 0, outBytes.position()); outBytes.clear() }
+                            if (outBytes.remaining() < 4) { os?.write(outBytes.array(), 0, outBytes.position()); outBytes.clear() }
                             outBytes.putShort((l.coerceIn(-1f, 1f) * 32767).toInt().toShort())
                             outBytes.putShort((r.coerceIn(-1f, 1f) * 32767).toInt().toShort())
                             written++
                         }
                     }
-                    if (outBytes.position() > 0) { os.write(outBytes.array(), 0, outBytes.position()); outBytes.clear() }
+                    if (outBytes.position() > 0) { os?.write(outBytes.array(), 0, outBytes.position()); outBytes.clear() }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0 || written >= maxFrames) break@loop
                 }
             }
@@ -390,7 +392,7 @@ object MusicMux {
         } catch (e: Exception) {
             return 0
         } finally {
-            runCatching { os.close() }
+            runCatching { os?.close() }
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             ex.release()
@@ -462,9 +464,9 @@ object MusicMux {
         val muxer = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         try {
             ex.setDataSource(video.absolutePath)
-            val vTrack = (0 until ex.trackCount).first {
+            val vTrack = (0 until ex.trackCount).firstOrNull {
                 ex.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-            }
+            } ?: throw RenderException("Video contains no video track.")
             ex.selectTrack(vTrack)
             val vFormat = ex.getTrackFormat(vTrack)
             val rotation = if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) vFormat.getInteger(MediaFormat.KEY_ROTATION)

@@ -6,10 +6,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /** A frame we show the model: label like "clip 0 at 3.2 s" and JPEG bytes. */
 class Frame(val label: String, val jpeg: ByteArray)
@@ -117,37 +119,101 @@ class GeminiClient(private val key: String, private var model: String?) : LlmCli
     override val activeModel: String? get() = model
 
     private suspend fun ranked(): List<String> {
-        val json = http("GET", "$base/models?pageSize=200", mapOf("x-goog-api-key" to key), null)
-        val models = JSONObject(json).optJSONArray("models") ?: JSONArray()
-        val names = (0 until models.length()).mapNotNull { i ->
-            val m = models.getJSONObject(i)
-            val methods = m.optJSONArray("supportedGenerationMethods")?.toString() ?: ""
-            if ("generateContent" in methods) m.getString("name").removePrefix("models/") else null
+        val collected = LinkedHashSet<String>()
+        val seenTokens = HashSet<String>()
+        var pageToken: String? = null
+        var pages = 0
+        while (pages < 10) {
+            pages++
+            val url = buildString {
+                append("$base/models?pageSize=200")
+                if (!pageToken.isNullOrBlank()) {
+                    append("&pageToken=")
+                    append(URLEncoder.encode(pageToken, "UTF-8"))
+                }
+            }
+            val json = http("GET", url, mapOf("x-goog-api-key" to key), null)
+            val root = try {
+                JSONObject(json)
+            } catch (e: JSONException) {
+                throw ApiException("Gemini returned malformed model list JSON.", 422)
+            }
+            val models = root.optJSONArray("models") ?: JSONArray()
+            for (i in 0 until models.length()) {
+                val m = models.optJSONObject(i) ?: continue
+                val methods = m.optJSONArray("supportedGenerationMethods") ?: continue
+                var supportsGenerate = false
+                for (j in 0 until methods.length()) {
+                    if (methods.optString(j) == "generateContent") {
+                        supportsGenerate = true
+                        break
+                    }
+                }
+                if (supportsGenerate) {
+                    val clean = m.optString("name", "").removePrefix("models/").trim()
+                    if (clean.isNotEmpty()) collected += clean
+                }
+            }
+            val next = root.optString("nextPageToken", "").trim()
+            if (next.isEmpty() || !seenTokens.add(next)) break
+            pageToken = next
         }
-        return ModelPicker.geminiRanked(names)
+        return ModelPicker.geminiRanked(collected.toList())
     }
 
     override suspend fun pickModel(): String = ranked().first().also { model = it }
 
     override suspend fun complete(system: String, user: String, frames: List<Frame>): String {
-        val parts = JSONArray().put(JSONObject().put("text", user))
+        val parts = JSONArray()
+        if (user.isNotBlank()) parts.put(JSONObject().put("text", user))
         frames.forEach { f ->
-            parts.put(JSONObject().put("text", f.label))
-            parts.put(JSONObject().put("inline_data", JSONObject()
-                .put("mime_type", "image/jpeg")
-                .put("data", Base64.encodeToString(f.jpeg, Base64.NO_WRAP))))
+            if (f.label.isNotBlank()) parts.put(JSONObject().put("text", f.label))
+            parts.put(
+                JSONObject().put(
+                    "inlineData",
+                    JSONObject()
+                        .put("mimeType", "image/jpeg")
+                        .put("data", Base64.encodeToString(f.jpeg, Base64.NO_WRAP)),
+                )
+            )
         }
         val body = JSONObject()
-            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
             .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
             .put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0.4))
+        if (system.isNotBlank()) {
+            body.put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+        }
         val bodyText = body.toString()
+        val blockingFinishReasons = setOf(
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+            "MALFORMED_FUNCTION_CALL",
+        )
         val (used, text) = tryModels(model, ::ranked, "Gemini") { m ->
             val json = http("POST", "$base/models/$m:generateContent", mapOf("x-goog-api-key" to key), bodyText)
-            val cand = JSONObject(json).optJSONArray("candidates")?.optJSONObject(0)
-                ?: throw ApiException("Gemini returned no answer (it may have been blocked). Try rephrasing.")
+            val root = try {
+                JSONObject(json)
+            } catch (e: JSONException) {
+                throw ApiException("Gemini returned malformed JSON.", 422)
+            }
+            val blockReason = root.optJSONObject("promptFeedback")?.optString("blockReason", "")?.trim().orEmpty()
+            if (blockReason.isNotEmpty()) {
+                throw ApiException("Gemini blocked the prompt ($blockReason). Try rephrasing.", 422)
+            }
+            val cand = root.optJSONArray("candidates")?.optJSONObject(0)
+                ?: throw ApiException("Gemini returned no answer (it may have been blocked). Try rephrasing.", 422)
+            val finishReason = cand.optString("finishReason", "").trim()
+            if (finishReason in blockingFinishReasons) {
+                throw ApiException("Gemini stopped due to $finishReason. Try rephrasing.", 422)
+            }
             val outParts = cand.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
-            (0 until outParts.length()).joinToString("") { outParts.getJSONObject(it).optString("text") }
+            val joined = (0 until outParts.length()).joinToString("") { outParts.optJSONObject(it)?.optString("text").orEmpty() }
+            if (joined.isBlank()) throw ApiException("Gemini returned an empty response.", 422)
+            joined
         }
         model = used
         return text
@@ -164,7 +230,9 @@ class GroqClient(private val key: String, private var model: String?) : LlmClien
     private suspend fun ranked(): List<String> {
         val json = http("GET", "$base/models", auth, null)
         val data = JSONObject(json).optJSONArray("data") ?: JSONArray()
-        return ModelPicker.groqRanked((0 until data.length()).map { data.getJSONObject(it).getString("id") })
+        return ModelPicker.groqRanked((0 until data.length()).mapNotNull {
+            data.optJSONObject(it)?.optString("id")?.takeIf { id -> id.isNotBlank() }
+        })
     }
 
     override suspend fun pickModel(): String = ranked().first().also { model = it }
@@ -206,7 +274,9 @@ class GroqClient(private val key: String, private var model: String?) : LlmClien
         // Reasoning models spend tokens thinking; keep that short so the answer isn't cut off.
         if ("gpt-oss" in m) body.put("reasoning_effort", "low")
         val json = http("POST", "$base/chat/completions", auth, body.toString())
-        return JSONObject(json).getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content")
+        val choice = JSONObject(json).optJSONArray("choices")?.optJSONObject(0)
+            ?: throw ApiException("Groq returned no choices.", 422)
+        return choice.optJSONObject("message")?.optString("content").orEmpty()
     }
 }
 

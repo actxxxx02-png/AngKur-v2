@@ -39,3 +39,9 @@ PromptCut upgrades natural-language video editing into a full multi-track monoch
 ## Quick Build & Run
 
 See [`BUILD.md`](BUILD.md) for SDK, Gradle, test, and signed release build commands, and [`CHANGELOG.md`](CHANGELOG.md) for full release notes.
+
+## Developer Attribution
+
+Developed by **Angkur**.
+
+All open-source third-party libraries (including AndroidX, Jetpack Compose, Media3, Room, and Material Symbols) remain subject to their respective upstream licenses and copyrights.
