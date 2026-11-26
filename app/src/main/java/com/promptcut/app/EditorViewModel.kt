@@ -994,6 +994,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     var musicTasteProfile by mutableStateOf<String?>(null)
         private set
+    fun loadLibraryTrackForTaste(uri: Uri) {
+        pickSong(uri)
+    }
+
     fun searchLibrary(query: String? = null) {
         val q = (query ?: libQuery).ifBlank { MusicLibrary.defaultQuery(mood, occasion) }
         libQuery = q
