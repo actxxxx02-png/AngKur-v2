@@ -501,18 +501,18 @@ fun AudioStudioPanel(vm: EditorViewModel, onPickSong: () -> Unit) {
         }
 
         HorizontalDivider()
-        Text("Built-In SFX Synth (inserts at ${round1(usToSec(vm.playheadUs))}s)", style = MaterialTheme.typography.labelMedium)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            SfxType.entries.forEach { sfx ->
-                OutlinedButton(
-                    onClick = { vm.insertSfxAtPlayhead(sfx) },
-                    modifier = Modifier.testTag("sfx_${sfx.key}_button"),
-                ) {
-                    Text("+ ${sfx.label}", style = MaterialTheme.typography.labelSmall)
+        Text("Sound effects are optional. Leave them off for dialogue, natural footage or clean edits.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("SFX Library · inserts at ${round1(usToSec(vm.playheadUs))}s", style = MaterialTheme.typography.labelMedium)
+        com.promptcut.app.audio.SfxSynth.categories().forEach { (category, sounds) ->
+            Text(category, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                sounds.forEach { sfx ->
+                    OutlinedButton(onClick = { vm.insertSfxAtPlayhead(sfx) }, modifier = Modifier.testTag("sfx_${sfx.key}_button")) {
+                        Text("+ ${sfx.label}", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
-
         HorizontalDivider()
         Text("Multi-Track Mixer & Mastering", style = MaterialTheme.typography.labelMedium)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
