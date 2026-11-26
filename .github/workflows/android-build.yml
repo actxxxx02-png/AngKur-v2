@@ -3,7 +3,7 @@ name: Android CI & Artifact Build
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "feature/**"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:

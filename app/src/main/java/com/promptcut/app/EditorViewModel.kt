@@ -14,6 +14,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import com.promptcut.app.agent.AgentEvent
 import com.promptcut.app.agent.AgentState
 import com.promptcut.app.agent.EditingAgent
@@ -129,6 +135,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var pendingPaidConsentError by mutableStateOf(false)
         private set
 
+    // Optional style-only reference. It is never added to the output timeline.
+    var referenceVideoUri by mutableStateOf<Uri?>(null)
+        private set
+    var referenceVideoName by mutableStateOf<String?>(null)
+        private set
+    var referenceStyleNotes by mutableStateOf<String?>(null)
+        private set
+
+    fun setReferenceVideo(uri: Uri) {
+        viewModelScope.launch {
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val name = EditorMediaHelper.displayName(ctx, uri)
+            referenceVideoUri = uri
+            referenceVideoName = name
+            referenceStyleNotes = null
+            status = "Studying example video style…"
+            val notes = runCatching {
+                ClipUnderstanding.analyzeReference(ctx, uri, name) { step -> status = step }
+            }.getOrElse { "Reference selected: $name. Analysis incomplete (${it.message ?: "unsupported video"}); use it only for style guidance." }
+            referenceStyleNotes = "$notes Never insert the reference footage or copy its audio into the export."
+            status = "Example video analyzed. Add your footage and generate an edit."
+        }
+    }
+    fun clearReferenceVideo() {
+        referenceVideoUri = null
+        referenceVideoName = null
+        referenceStyleNotes = null
+    }
+
     // Footage
     val clips = mutableStateListOf<Clip>()
     val insights = mutableStateMapOf<Int, ClipInsight>()
@@ -179,6 +214,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var askedLengthSec by mutableStateOf<Double?>(null); private set
     var song by mutableStateOf<Song?>(null); private set
 
+    var selectedSongPreviewUri by mutableStateOf<Uri?>(null)
+        private set
+
+    private var songPreviewPlayer: ExoPlayer? = null
+
+    fun auditionSong(uri: Uri) {
+        stopSongPreview()
+        selectedSongPreviewUri = uri
+        runCatching {
+            songPreviewPlayer = ExoPlayer.Builder(ctx).build().apply {
+                setMediaItem(MediaItem.fromUri(uri))
+                repeatMode = Player.REPEAT_MODE_OFF
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_ENDED) stopSongPreview()
+                    }
+                })
+                prepare()
+                playWhenReady = true
+            }
+        }.onFailure {
+            stopSongPreview()
+            status = "Could not preview this song: ${it.message ?: "unsupported audio"}"
+        }
+    }
+
+    fun stopSongPreview() {
+        runCatching { songPreviewPlayer?.stop(); songPreviewPlayer?.release() }
+        songPreviewPlayer = null
+        selectedSongPreviewUri = null
+    }
+
     // Free song library
     val libResults = mutableStateListOf<LibraryTrack>()
     var libQuery by mutableStateOf("")
@@ -226,6 +293,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         WorkService.stop(ctx)
+        stopSongPreview()
         VisualCache.clearMemory()
         super.onCleared()
     }
@@ -778,6 +846,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startOver() {
         job?.cancel(); analysisJob?.cancel()
+        clearReferenceVideo()
+        musicTasteProfile = null
+        song = null; libSong = null
         clips.clear(); insights.clear(); chat.clear(); clipCuts.clear(); askedLengthSec = null
         segmentThumbnails.clear(); clipWaveforms.clear(); musicWaveform = null
         plan = null; output = null; qa = null; status = null; busy = false; analyzing = false
@@ -898,18 +969,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun pickSong(uri: Uri) {
         viewModelScope.launch {
             status = "Listening to your song…"
-            runCatching {
-                ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             val name = EditorMediaHelper.displayName(ctx, uri)
             val s = EditorMediaHelper.analyzeSong(ctx, uri, name)
             if (s == null) { status = "Couldn't read that audio file. Try another song."; return@launch }
             song = s
+            libSong = null
             musicSource = MusicSource.MY_SONG
             musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
             attachSongToTimeline(s)
-            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM)." else "Song ready."
+            musicTasteProfile = buildMusicTasteProfile(s)
+            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM). Taste profile updated." else "Song ready. Taste profile updated."
         }
+    }
+
+    private fun buildMusicTasteProfile(s: Song): String {
+        val bpm = s.tempo?.bpm ?: 100.0
+        val tempoTaste = when { bpm < 75 -> "slow / emotional"; bpm < 100 -> "calm / relaxed"; bpm < 118 -> "mid-tempo / groove"; bpm < 138 -> "upbeat / energetic"; else -> "fast / high-energy" }
+        val dynamic = s.envelope?.let { values ->
+            if (values.isEmpty()) "unknown dynamics" else {
+                val mean = values.average()
+                val variance = values.map { (it - mean) * (it - mean) }.average()
+                if (variance > 0.03) "dynamic / changing intensity" else "steady intensity"
+            }
+        } ?: "unknown dynamics"
+        return "Taste learned from ${s.name}: $tempoTaste (${bpm.toInt()} BPM), $dynamic. Use tracks with a similar tempo and energy when suggesting music."
+    }
+
+    var musicTasteProfile by mutableStateOf<String?>(null)
+        private set
+    fun loadLibraryTrackForTaste(uri: Uri) {
+        pickSong(uri)
     }
 
     fun searchLibrary(query: String? = null) {
@@ -951,7 +1041,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val s = loadLibraryTrack(t)
                 libSong = s
                 musicSource = MusicSource.LIBRARY
+                song = null
                 musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
+                musicTasteProfile = buildMusicTasteProfile(s)
                 attachSongToTimeline(s)
                 libError = null
             } catch (e: Exception) {
@@ -976,25 +1068,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         syncFromEngine()
     }
 
-    private suspend fun autoPickSong(p: EditPlan): Song? {
-        val q = p.musicQuery.ifBlank { libQuery.ifBlank { MusicLibrary.defaultQuery(p.mood, occasion) } }
-        status = "Finding a free ${p.mood.label.lowercase()} song…"
-        val found = runCatching { MusicLibrary.search(q, p.totalSec + 2) }.getOrNull().orEmpty()
-            .ifEmpty { runCatching { MusicLibrary.search(MusicLibrary.defaultQuery(p.mood, occasion), p.totalSec + 2) }.getOrNull().orEmpty() }
-        if (found.isNotEmpty()) { libResults.clear(); libResults += found; libQuery = q }
-        for (t in found.take(3)) {
-            val s = runCatching { loadLibraryTrack(t) }.getOrNull()
-            if (s != null) {
-                musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
-                return s
-            }
-        }
-        return null
-    }
+    // Background scores are never selected silently. The user chooses a full song in the library.
 
     // ------------------------------------------------------------------ AI Agent Editing + Render
 
     private fun styleRequest(extra: String): String = buildString {
+        referenceStyleNotes?.let { appendLine("REFERENCE VIDEO STYLE (do not use as source footage): $it") }
+        musicTasteProfile?.let { appendLine("USER MUSIC TASTE: $it") }
         append("Make a video. ")
         if (off.isNotEmpty()) append("Anything not stated here: decide yourself from the user's words and the footage. ")
         if (isOn(Opt.OCCASION)) append("Occasion: $occasion. ")
@@ -1007,6 +1087,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (useAllClips && isOn(Opt.USE_ALL)) append("Use EVERY clip at least once (${clips.size} clips). ")
         if (isOn(Opt.ORDER)) append("Order: ${orderMode.label}. ")
         if (isOn(Opt.MUSIC)) append("Music: ${musicSource.label}. ")
+        referenceStyleNotes?.let { append("Reference style guidance: $it ") }
+        musicTasteProfile?.let { append("User music taste: $it ") }
         selectedPreset?.let { append("Style: ${it.name} - ${it.description}. ${it.instructions}. ") }
         if (extra.isNotBlank()) append("User instructions: $extra")
     }.let { if (nothingSelected && extra.isNotBlank()) extra else it }
@@ -1181,10 +1263,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val currentProject = _timelineProject.value
         if (currentProject.mainVideoTrack.items.isEmpty()) return
 
-        if (musicSource == MusicSource.LIBRARY && libSong == null && currentProject.mainAudioTrack.items.isEmpty()) {
-            libSong = autoPickSong(currentProject.toEditPlan())
-            if (libSong == null) musicSource = MusicSource.MOOD
-        }
+        // Never inject a background score without the user's explicit choice.
+        // Preserve original clip audio unless a track has been deliberately selected.
+
         val songNow = when (musicSource) { MusicSource.MY_SONG -> song; MusicSource.LIBRARY -> libSong; else -> null }
         val music: MusicMux.Source? = when (musicSource) {
             MusicSource.ORIGINAL -> null

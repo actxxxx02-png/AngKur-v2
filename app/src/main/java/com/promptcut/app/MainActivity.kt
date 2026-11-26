@@ -128,8 +128,12 @@ fun EditorScreen(vm: EditorViewModel) {
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { vm.addClips(it) }
     val pickVideos = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
+    val referencePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { vm.setReferenceVideo(it) } }
+    val pickReferenceVideo = { referencePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
     val songPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.pickSong(it) } }
     val pickSong = { songPicker.launch(arrayOf("audio/*")) }
+    val musicLibraryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.loadLibraryTrackForTaste(it) } }
+    val pickAnyMusic = { musicLibraryPicker.launch(arrayOf("audio/*", "application/ogg", "application/octet-stream")) }
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     LaunchedEffect(Unit) {
@@ -202,6 +206,41 @@ fun EditorScreen(vm: EditorViewModel) {
                 .padding(horizontal = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            // Source footage controls: examples are never inserted into the output.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = pickVideos, modifier = Modifier.weight(1f)) { Text(if (vm.clips.isEmpty()) "Add footage" else "Add more footage") }
+                OutlinedButton(onClick = pickReferenceVideo, modifier = Modifier.weight(1f)) { Text("Add example video") }
+            }
+            vm.referenceVideoName?.let { name ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Style reference: $name", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = { vm.clearReferenceVideo() }) { Text("Remove") }
+                }
+            }
+            
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Music library", style = MaterialTheme.typography.labelLarge)
+                        Text("Choose audio from your device. PromptCut will analyse tempo and energy to learn your taste.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    OutlinedButton(onClick = pickAnyMusic) { Text("Browse music") }
+                }
+                vm.musicTasteProfile?.let { Text(it, Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp), style = MaterialTheme.typography.bodySmall) }
+            }
+
+            // Reference video is style guidance only. It is never part of the export footage.
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(vm.referenceVideoName ?: "Example video (optional)", style = MaterialTheme.typography.labelLarge)
+                        Text(vm.referenceStyleNotes ?: "Show an example edit to learn its pacing and visual style. Prompt is optional.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    OutlinedButton(onClick = pickReferenceVideo) { Text(if (vm.referenceVideoUri == null) "Add example" else "Change") }
+                    if (vm.referenceVideoUri != null) TextButton(onClick = { vm.clearReferenceVideo() }) { Text("Remove") }
+                }
+            }
+
             // Session / Interrupted Render Recovery Banner
             if (vm.recoverableSession != null || vm.recoverableRenderJob != null) {
                 OutlinedCard(modifier = Modifier.fillMaxWidth()) {

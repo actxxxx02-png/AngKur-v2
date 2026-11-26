@@ -119,6 +119,8 @@ fun AgentPanel(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         // Source clips tray
+        Text("Build an edit from your footage. Add an example video to guide the style; a text prompt is optional.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
         LazyRow(
             contentPadding = PaddingValues(vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -144,6 +146,16 @@ fun AgentPanel(
                         Icon(Icons.Default.Add, contentDescription = "Add videos")
                         Text(if (vm.clips.isEmpty()) "Add clips" else "Add more", style = MaterialTheme.typography.labelSmall)
                     }
+                }
+            }
+        }
+
+        // Music taste feedback is learned from the track the user actually chooses.
+        vm.musicTasteProfile?.let { profile ->
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Your music taste", style = MaterialTheme.typography.labelLarge)
+                    Text(profile, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -381,6 +393,7 @@ fun LibraryPanel(vm: EditorViewModel) {
     DisposableEffect(Unit) { onDispose { player.release() } }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Preview a full song before selecting it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         vm.libSong?.let { s ->
             Text(
                 "Active track: ${s.name}" + (s.tempo?.let { " · ${it.bpm.toInt()} BPM" } ?: ""),
@@ -411,7 +424,7 @@ fun LibraryPanel(vm: EditorViewModel) {
                 TextButton(onClick = {
                     if (playingId == t.id) { player.stop(); playingId = null }
                     else { player.setMediaItem(MediaItem.fromUri(t.url)); player.prepare(); player.play(); playingId = t.id }
-                }) { Text(if (playingId == t.id) "Stop" else "Play") }
+                }) { Text(if (playingId == t.id) "Stop" else "Preview") }
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     Text(
@@ -423,7 +436,7 @@ fun LibraryPanel(vm: EditorViewModel) {
                 when {
                     vm.libLoadingId == t.id -> Text("Loading…", style = MaterialTheme.typography.labelSmall)
                     chosen -> Text("Selected", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    else -> TextButton(onClick = { player.stop(); playingId = null; vm.useLibraryTrack(t) }) { Text("Use") }
+                    else -> TextButton(onClick = { player.stop(); playingId = null; vm.useLibraryTrack(t) }) { Text("Use song") }
                 }
             }
         }

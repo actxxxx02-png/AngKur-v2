@@ -127,19 +127,50 @@ object StoryAnalyzer {
         return resolveOverlaps(out.sortedBy { it.startUs })
     }
 
+    /**
+     * Sparse, conservative SFX suggestions. Silence is the default: ordinary cuts,
+     * dialogue, emotional moments and continuous natural footage should remain clean.
+     */
     fun suggestSfxCues(project: TimelineProject, insights: Map<Int, ClipInsight>): List<SfxCue> {
-        val cues = mutableListOf<SfxCue>()
         val items = project.mainVideoTrack.items.sortedBy { it.timelineStartUs }
+        if (items.size < 2) return emptyList()
+        val cues = mutableListOf<SfxCue>()
         items.forEachIndexed { idx, item ->
-            if (idx > 0 && item.transitionIn.key != "cut") {
-                cues += SfxCue(item.timelineStartUs, "Whoosh", "Transition into shot ${idx + 1}")
-            }
             val ins = insights[item.sourceClipIndex]
-            if (ins != null && ins.gamingEvents.any { "KILL" in it || "HEADSHOT" in it || "VICTORY" in it }) {
-                cues += SfxCue(item.timelineStartUs + item.timelineDurationUs / 3, "Impact", "Gaming highlight cue")
+            val events = ins?.gamingEvents.orEmpty()
+            val strongGameMoment = events.any { event ->
+                val e = event.uppercase()
+                listOf("VICTORY", "HEADSHOT", "KILL", "LEVEL UP", "BOSS", "WIN").any { it in e }
+            }
+            val highlight = ins?.highlights?.filter { it.score >= 4.5 }?.maxByOrNull { it.score }
+            val explicitAction = ins?.shots?.any { shot ->
+                shot.interest >= 3 && shot.labels.any { label ->
+                    label.equals("Explosion", true) || label.equals("Fireworks", true) || label.equals("Sports", true)
+                }
+            } == true
+
+            // Only add a cue for unmistakable peaks. No automatic whoosh on ordinary transitions.
+            if (strongGameMoment) {
+                cues += SfxCue(
+                    timelineUs = item.timelineStartUs + item.timelineDurationUs * 2 / 3,
+                    type = "Impact",
+                    reason = "Strong gameplay payoff detected; optional impact accent",
+                )
+            } else if (highlight != null && explicitAction) {
+                cues += SfxCue(
+                    timelineUs = item.timelineStartUs + item.timelineDurationUs / 2,
+                    type = "Impact",
+                    reason = "Distinct action peak detected; optional impact accent",
+                )
+            }
+
+            // Cap density: never clutter adjacent shots with effects.
+            if (idx > 0 && cues.isNotEmpty()) {
+                val previous = cues.last()
+                if (item.timelineStartUs - previous.timelineUs < 2_500_000L) cues.removeAt(cues.lastIndex)
             }
         }
-        return cues
+        return cues.distinctBy { it.type to (it.timelineUs / 1_000_000L) }.take(3)
     }
 
     private fun resolveOverlaps(sorted: List<CaptionItem>): List<CaptionItem> {
