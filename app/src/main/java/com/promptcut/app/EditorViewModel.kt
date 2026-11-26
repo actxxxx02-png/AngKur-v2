@@ -14,6 +14,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import com.promptcut.app.agent.AgentEvent
 import com.promptcut.app.agent.AgentState
 import com.promptcut.app.agent.EditingAgent
@@ -145,49 +148,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             referenceVideoName = name
             referenceStyleNotes = null
             status = "Studying example video style…"
-            val notes = withContext(Dispatchers.IO) {
-                runCatching {
-                    android.media.MediaMetadataRetriever().use { retriever ->
-                        retriever.setDataSource(ctx, uri)
-                        val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                        val duration = durationMs / 1000.0
-                        val count = (duration / 2.0).toInt().coerceIn(1, 24)
-                        val times = (0 until count).map { ((it + 0.5) * duration / count * 1_000_000).toLong() }
-                        val lumas = mutableListOf<Double>()
-                        val changes = mutableListOf<Double>()
-                        var previous: IntArray? = null
-                        times.forEach { time ->
-                            val bitmap = retriever.getScaledFrameAtTime(time, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 96, 96) ?: return@forEach
-                            val pixels = IntArray(bitmap.width * bitmap.height)
-                            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                            val sample = (0 until pixels.size step 12).map { px ->
-                                val color = pixels[px]
-                                (android.graphics.Color.red(color) * 0.299 + android.graphics.Color.green(color) * 0.587 + android.graphics.Color.blue(color) * 0.114).toInt()
-                            }.toIntArray()
-                            lumas += sample.average()
-                            previous?.let { old ->
-                                val n = minOf(old.size, sample.size).coerceAtLeast(1)
-                                changes += (0 until n).sumOf { kotlin.math.abs(old[it] - sample[it]).toDouble() } / n
-                            }
-                            previous = sample
-                            bitmap.recycle()
-                        }
-                        val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                        val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                        val avgChange = changes.average().takeIf { it.isFinite() } ?: 0.0
-                        val pace = when { avgChange > 32 -> "fast, high visual-change pacing"; avgChange > 18 -> "moderate pacing"; else -> "slow, steady pacing" }
-                        val brightness = lumas.average().takeIf { it.isFinite() } ?: 110.0
-                        val light = when { brightness < 75 -> "dark / low-key exposure"; brightness > 175 -> "bright / high-key exposure"; else -> "balanced exposure" }
-                        val fps = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toDoubleOrNull()
-                        "Reference: $name. Duration ${String.format(java.util.Locale.US, "%.1f", duration)}s; ${width}x${height}; ${fps?.let { String.format(java.util.Locale.US, "%.1f fps", it) } ?: "frame rate unknown"}. Rhythm: $pace. Exposure: $light. Match style, shot rhythm, framing energy and mood only. Never insert reference footage or copy its audio."
-                    }
-                }.getOrElse { "Reference selected: $name. Frame inspection was incomplete; use this only as style guidance and never insert the reference clip into the export." }
-            }
-            referenceStyleNotes = notes
-            status = "Example studied. Add your footage and generate an edit."
+            val notes = runCatching {
+                ClipUnderstanding.analyzeReference(ctx, uri, name) { step -> status = step }
+            }.getOrElse { "Reference selected: $name. Analysis incomplete (${it.message ?: "unsupported video"}); use it only for style guidance." }
+            referenceStyleNotes = "$notes Never insert the reference footage or copy its audio into the export."
+            status = "Example video analyzed. Add your footage and generate an edit."
         }
     }
-
     fun clearReferenceVideo() {
         referenceVideoUri = null
         referenceVideoName = null
@@ -247,11 +214,34 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var selectedSongPreviewUri by mutableStateOf<Uri?>(null)
         private set
 
+    private var songPreviewPlayer: ExoPlayer? = null
+
     fun auditionSong(uri: Uri) {
+        stopSongPreview()
         selectedSongPreviewUri = uri
+        runCatching {
+            songPreviewPlayer = ExoPlayer.Builder(ctx).build().apply {
+                setMediaItem(MediaItem.fromUri(uri))
+                repeatMode = Player.REPEAT_MODE_OFF
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_ENDED) stopSongPreview()
+                    }
+                })
+                prepare()
+                playWhenReady = true
+            }
+        }.onFailure {
+            stopSongPreview()
+            status = "Could not preview this song: ${it.message ?: "unsupported audio"}"
+        }
     }
 
-    fun stopSongPreview() { selectedSongPreviewUri = null }
+    fun stopSongPreview() {
+        runCatching { songPreviewPlayer?.stop(); songPreviewPlayer?.release() }
+        songPreviewPlayer = null
+        selectedSongPreviewUri = null
+    }
 
     // Free song library
     val libResults = mutableStateListOf<LibraryTrack>()
@@ -300,6 +290,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         WorkService.stop(ctx)
+        stopSongPreview()
         VisualCache.clearMemory()
         super.onCleared()
     }
