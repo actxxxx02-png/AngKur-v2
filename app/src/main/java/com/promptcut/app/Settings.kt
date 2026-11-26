@@ -31,6 +31,17 @@ class Settings(context: Context, private val vault: KeyVault = KeyVault()) {
     val privacy = PrivacyManager(prefs)
     val keyManager = ApiKeyManager(prefs, vault)
 
+    /** Optional remote vault URL. API credentials themselves remain encrypted on this device. */
+    var remoteVaultUrl: String
+        get() = prefs.getString("remote_vault_url", "") ?: ""
+        set(value) = prefs.edit().putString("remote_vault_url", value.trim().trimEnd('/')).apply()
+
+    fun remoteVaultPassword(): String =
+        vault.readAndMigrate(prefs, "remote_vault_password").getOrNull().orEmpty()
+
+    fun setRemoteVaultPassword(value: String): AppResult<Unit> =
+        vault.writeKey(prefs, "remote_vault_password", value)
+
     var provider: Provider
         get() = runCatching { Provider.valueOf(prefs.getString("provider", null) ?: "") }.getOrDefault(Provider.GEMINI)
         set(v) = prefs.edit().putString("provider", v.name).apply()
