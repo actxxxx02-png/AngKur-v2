@@ -121,6 +121,17 @@ module.exports = async function handler(req, res) {
           isPreferred: !keys.some((entry) => entry.providerId === providerId && entry.isPreferred),
           createdAt: new Date().toISOString(),
         });
+      } else if (body.action === 'update') {
+        const item = keys.find((entry) => entry.id === body.id);
+        if (!item) return send(res, 404, { error: 'Key not found.' });
+        const key = String(body.key || '').trim();
+        if (key.length < 8 || key.length > 4096) return send(res, 400, { error: 'Replacement API key length is invalid.' });
+        if (keys.some((entry) => entry.id !== item.id && entry.providerId === item.providerId && entry.key === key)) {
+          return send(res, 409, { error: 'That key is already saved for this provider.' });
+        }
+        item.key = key;
+        item.name = String(body.name || '').trim().slice(0, 48) || item.name;
+        item.updatedAt = new Date().toISOString();
       } else {
         return send(res, 400, { error: 'Unknown action.' });
       }
