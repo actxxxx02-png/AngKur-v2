@@ -178,7 +178,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         val pace = when { avgChange > 32 -> "fast, high visual-change pacing"; avgChange > 18 -> "moderate pacing"; else -> "slow, steady pacing" }
                         val brightness = lumas.average().takeIf { it.isFinite() } ?: 110.0
                         val light = when { brightness < 75 -> "dark / low-key exposure"; brightness > 175 -> "bright / high-key exposure"; else -> "balanced exposure" }
-                        "Reference: $name. Duration ${String.format(java.util.Locale.US, "%.1f", duration)}s; ${width}x${height}. Rhythm: $pace. Exposure: $light. Match style, shot rhythm, framing energy and mood only. Never insert reference footage or copy its audio."
+                        val fps = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toDoubleOrNull()
+                        "Reference: $name. Duration ${String.format(java.util.Locale.US, "%.1f", duration)}s; ${width}x${height}; ${fps?.let { String.format(java.util.Locale.US, "%.1f fps", it) } ?: "frame rate unknown"}. Rhythm: $pace. Exposure: $light. Match style, shot rhythm, framing energy and mood only. Never insert reference footage or copy its audio."
                     }
                 }.getOrElse { "Reference selected: $name. Frame inspection was incomplete; use this only as style guidance and never insert the reference clip into the export." }
             }
