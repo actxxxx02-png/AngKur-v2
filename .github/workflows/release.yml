@@ -95,10 +95,19 @@ jobs:
             platforms;android-36
             build-tools;36.0.0
 
-      - name: Accept Android SDK licenses
+      - name: Accept Android SDK licenses and verify SDK 36 packages
         run: |
           set +o pipefail
           yes | sdkmanager --licenses
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ ! -d "$SDK_DIR/platforms/android-36" ] || [ ! -d "$SDK_DIR/build-tools/36.0.0" ]; then
+            sdkmanager --install \
+              "platform-tools" \
+              "platforms;android-36" \
+              "build-tools;36.0.0"
+          fi
+          test -d "$SDK_DIR/platforms/android-36"
+          test -d "$SDK_DIR/build-tools/36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -118,7 +127,7 @@ jobs:
       - name: Verify release signature & package deliverables
         run: |
           TAG="${{ steps.meta.outputs.tag }}"
-          APKSIGNER="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner"
           APK_SRC="app/build/outputs/apk/release/app-release.apk"
           AAB_SRC="app/build/outputs/bundle/release/app-release.aab"
 
