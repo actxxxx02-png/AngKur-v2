@@ -843,6 +843,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startOver() {
         job?.cancel(); analysisJob?.cancel()
+        clearReferenceVideo()
+        musicTasteProfile = null
+        song = null; libSong = null
         clips.clear(); insights.clear(); chat.clear(); clipCuts.clear(); askedLengthSec = null
         segmentThumbnails.clear(); clipWaveforms.clear(); musicWaveform = null
         plan = null; output = null; qa = null; status = null; busy = false; analyzing = false
