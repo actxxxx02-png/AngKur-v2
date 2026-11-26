@@ -244,6 +244,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var askedLengthSec by mutableStateOf<Double?>(null); private set
     var song by mutableStateOf<Song?>(null); private set
 
+    var selectedSongPreviewUri by mutableStateOf<Uri?>(null)
+        private set
+
+    fun auditionSong(uri: Uri) {
+        selectedSongPreviewUri = uri
+    }
+
+    fun stopSongPreview() { selectedSongPreviewUri = null }
+
     // Free song library
     val libResults = mutableStateListOf<LibraryTrack>()
     var libQuery by mutableStateOf("")
