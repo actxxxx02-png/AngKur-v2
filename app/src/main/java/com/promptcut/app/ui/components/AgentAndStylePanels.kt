@@ -119,6 +119,8 @@ fun AgentPanel(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         // Source clips tray
+        Text("Build an edit from your footage. Add an example video to guide the style; a text prompt is optional.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
         LazyRow(
             contentPadding = PaddingValues(vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
