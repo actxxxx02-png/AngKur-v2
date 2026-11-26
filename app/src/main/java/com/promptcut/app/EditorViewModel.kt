@@ -1091,6 +1091,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (useAllClips && isOn(Opt.USE_ALL)) append("Use EVERY clip at least once (${clips.size} clips). ")
         if (isOn(Opt.ORDER)) append("Order: ${orderMode.label}. ")
         if (isOn(Opt.MUSIC)) append("Music: ${musicSource.label}. ")
+        referenceStyleNotes?.let { append("Reference style guidance: $it ") }
+        musicTasteProfile?.let { append("User music taste: $it ") }
         selectedPreset?.let { append("Style: ${it.name} - ${it.description}. ${it.instructions}. ") }
         if (extra.isNotBlank()) append("User instructions: $extra")
     }.let { if (nothingSelected && extra.isNotBlank()) extra else it }
