@@ -56,6 +56,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.promptcut.app.EditorViewModel
+import com.promptcut.app.DEFAULT_REMOTE_KEY_VAULT_URL
 import com.promptcut.app.PRIVACY_POLICY_URL
 import com.promptcut.app.RemoteKeyVaultClient
 import com.promptcut.app.ThemePreference
@@ -186,6 +187,18 @@ fun SettingsScreen(
                             onClick = { showVaultSyncConfirm = true },
                         ) { Text(if (vaultSyncing) "Syncing…" else "Replace & Sync") }
                     }
+                    TextButton(
+                        onClick = {
+                            val targetUrl = vaultUrl.trim().takeIf { it.startsWith("https://", ignoreCase = true) }
+                                ?: DEFAULT_REMOTE_KEY_VAULT_URL
+                            runCatching {
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)))
+                            }.onFailure {
+                                vaultStatus = "Could not open the vault website."
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("open_remote_vault_button"),
+                    ) { Text("Open Web Vault") }
                     vaultStatus?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
