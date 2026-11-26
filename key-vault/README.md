@@ -15,15 +15,15 @@ A small, private dashboard for storing Gemini, Groq, and Claude API keys. It is 
 
 Create these for Production, Preview, and Development:
 
-- `VAULT_PASSWORD`: a long, unique password for the dashboard and app sync.
-- `VAULT_ENCRYPTION_KEY`: base64 encoding of exactly 32 random bytes.
+- `VAULT_PASSWORD`: a long, unique random password (32+ characters) for the dashboard and app sync.
+- `VAULT_ENCRYPTION_KEY`: base64 encoding of exactly 32 random bytes. Generate one locally with `openssl rand -base64 32`.
 - `BLOB_READ_WRITE_TOKEN`: created automatically when the private Blob store is connected to the Vercel project.
 
-Never put these values in GitHub, HTML, Android source code, or screenshots. Redeploy after changing environment variables.
+In Vercel, create the two vault variables as **Sensitive/Encrypted** values for the Production environment (and Preview/Development only when needed). Attach the private Blob store to the same project so Vercel supplies `BLOB_READ_WRITE_TOKEN`. Redeploy after changing environment variables. Never paste these values into GitHub, HTML, Android source code, screenshots, or this chat.
 
 ## Deployment
 
-Deploy this directory as the Vercel project root (`key-vault`). Attach a **private** Vercel Blob store to that project. The static dashboard is `index.html`; the authenticated serverless endpoint is `/api/keys`.
+Create a Vercel project linked to this repository with the project root set to `key-vault/`. Attach a **private** Vercel Blob store to that project. The static dashboard is `index.html`; the authenticated serverless endpoint is `/api/keys`.
 
 GitHub Pages can host static HTML but cannot run this private storage API. Vercel is used for the full dashboard + API, while all source code remains in GitHub.
 
