@@ -61,7 +61,18 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&'
 function render(keys) {
   if (!keys.length) { $('keys').innerHTML='<p>No keys saved yet.</p>'; return; }
   const labels={GEMINI:'GEMINI',GROQ:'GROQ',CLAUDE:'CLAUDE'};
-  $('keys').innerHTML=keys.map(k=>'<div class="key"><div><strong>'+escapeHtml(k.name)+' <span class="pill">'+labels[k.providerId]+'</span></strong><small>'+escapeHtml(k.maskedKey)+' · '+(k.enabled?'Enabled':'Disabled')+(k.isPreferred?' · Preferred':'')+'</small></div><div class="key-actions"><button data-toggle="'+escapeHtml(k.id)+'" data-enabled="'+(!k.enabled)+'">'+(k.enabled?'Disable':'Enable')+'</button><button class="danger" data-delete="'+escapeHtml(k.id)+'">Delete</button></div></div>').join('');
+  $('keys').innerHTML=keys.map(k=>'<div class="key"><div><strong>'+escapeHtml(k.name)+' <span class="pill">'+labels[k.providerId]+'</span></strong><small>'+escapeHtml(k.maskedKey)+' · '+(k.enabled?'Enabled':'Disabled')+(k.isPreferred?' · Preferred':'')+'</small></div><div class="key-actions"><button data-update="'+escapeHtml(k.id)+'">Update</button><button data-toggle="'+escapeHtml(k.id)+'" data-enabled="'+(!k.enabled)+'">'+(k.enabled?'Disable':'Enable')+'</button><button class="danger" data-delete="'+escapeHtml(k.id)+'">Delete</button></div></div>').join('');
+  $('keys').querySelectorAll('[data-update]').forEach(b=>b.onclick=async()=>{
+    const current=keys.find(k=>k.id===b.dataset.update);
+    if(!current)return;
+    const name=prompt('Key label',current.name);
+    if(name===null)return;
+    const replacement=prompt('Paste the replacement API key. The current key will be overwritten.');
+    if(replacement===null)return;
+    if(replacement.trim().length<8){say('listStatus','Replacement key is too short.','error');return}
+    try{const r=await api('PUT',{action:'update',id:current.id,name,key:replacement.trim()});render(r.keys);say('listStatus','Key updated securely.','good')}
+    catch(e){say('listStatus',e.message,'error')}
+  });
   $('keys').querySelectorAll('[data-toggle]').forEach(b=>b.onclick=async()=>{try{const r=await api('PUT',{action:'toggle',id:b.dataset.toggle,enabled:b.dataset.enabled==='true'});render(r.keys)}catch(e){say('listStatus',e.message,'error')}});
   $('keys').querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this API key from the vault?'))return;try{const r=await api('DELETE',{id:b.dataset.delete});render(r.keys);say('listStatus','Key deleted.','good')}catch(e){say('listStatus',e.message,'error')}});
 }
