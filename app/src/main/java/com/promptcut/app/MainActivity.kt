@@ -86,11 +86,10 @@ import com.promptcut.app.ui.components.TimelineEditor
 import com.promptcut.app.ui.theme.PromptCutTheme
 
 /**
- * Privacy policy URL pointing to the repository's privacy-policy.html.
- * Publication note: enable GitHub Pages (or host docs/privacy-policy.html on a custom HTTPS page)
- * before Google Play Store submission.
+ * Privacy policy URL hosted via GitHub Pages from docs/privacy-policy.html.
+ * Enable Settings -> Pages -> Source: GitHub Actions in the repository to serve it live.
  */
-const val PRIVACY_POLICY_URL = "https://github.com/danieldevloper00-tech/AngKur-v2/blob/main/docs/privacy-policy.html"
+const val PRIVACY_POLICY_URL = "https://danieldevloper00-tech.github.io/AngKur-v2/privacy-policy.html"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {

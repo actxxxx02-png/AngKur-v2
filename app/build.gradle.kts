@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -19,39 +20,52 @@ android {
         versionName = "1.0.0"
     }
 
-    // Release signing: reads keystore.properties (never commit it). Without it, falls back to the debug key.
+    // Release signing: reads keystore.properties (never commit it) or CI environment variables.
+    // Without complete release credentials, falls back to Android Gradle's default debug signing for local verification.
     val keyProps = Properties().apply {
         val f = rootProject.file("keystore.properties")
         if (f.exists()) f.inputStream().use { load(it) }
     }
+    val releaseStorePath = keyProps.getProperty("storeFile")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("RELEASE_KEYSTORE_PATH")?.trim()?.takeIf { it.isNotEmpty() }
+    val releaseStoreFile = releaseStorePath?.let { path ->
+        val candidate = File(path)
+        if (candidate.isAbsolute) candidate else rootProject.file(path)
+    }
+    val releaseStorePassword = keyProps.getProperty("storePassword")?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("RELEASE_STORE_PASSWORD")?.takeIf { it.isNotEmpty() }
+    val releaseKeyAlias = keyProps.getProperty("keyAlias")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("RELEASE_KEY_ALIAS")?.trim()?.takeIf { it.isNotEmpty() }
+    val releaseKeyPassword = keyProps.getProperty("keyPassword")?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("RELEASE_KEY_PASSWORD")?.takeIf { it.isNotEmpty() }
+    val hasReleaseSigning = releaseStoreFile != null &&
+        releaseStoreFile.exists() &&
+        releaseStorePassword != null &&
+        releaseKeyAlias != null &&
+        releaseKeyPassword != null
+
     signingConfigs {
-        create("debugConfig") {
-            storeFile = file("${rootDir}/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
         create("upload") {
-            if (keyProps.getProperty("storeFile") != null) {
-                storeFile = file(keyProps.getProperty("storeFile"))
-                storePassword = keyProps.getProperty("storePassword")
-                keyAlias = keyProps.getProperty("keyAlias")
-                keyPassword = keyProps.getProperty("keyPassword")
+            if (hasReleaseSigning) {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debugConfig")
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            // Shrunk build (~5 MB), signed with your upload key for Google Play.
+            // Shrunk build (~6.5 MB), signed with your upload key for GitHub Releases / Google Play.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = if (keyProps.getProperty("storeFile") != null) signingConfigs.getByName("upload")
-                else signingConfigs.getByName("debugConfig")
+            signingConfig = if (hasReleaseSigning) signingConfigs.getByName("upload")
+                else signingConfigs.getByName("debug")
         }
     }
     compileOptions {

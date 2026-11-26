@@ -597,8 +597,13 @@ fun SettingsScreen(
                         "About PromptCut",
                         style = MaterialTheme.typography.titleSmall,
                     )
+                    val appVersion = remember(ctx) {
+                        runCatching {
+                            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                        }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.0.0"
+                    }
                     Text(
-                        "PromptCut v1.0.0 · Developed by Angkur",
+                        "PromptCut v$appVersion · Developed by Angkur",
                         style = MonoTimecodeStyle,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("developer_attribution"),
