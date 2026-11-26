@@ -57,6 +57,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.promptcut.app.EditorViewModel
 import com.promptcut.app.PRIVACY_POLICY_URL
+import com.promptcut.app.RemoteKeyVaultClient
 import com.promptcut.app.ThemePreference
 import com.promptcut.app.ai.ProviderId
 import com.promptcut.app.core.AppResult
@@ -104,6 +105,12 @@ fun SettingsScreen(
     var claudeConsent by remember { mutableStateOf(vm.settings.privacy.claudePaidConsentGranted) }
     var showClaudeConsentDialog by remember { mutableStateOf(false) }
 
+    var vaultUrl by remember { mutableStateOf(vm.settings.remoteVaultUrl) }
+    var vaultPassword by remember { mutableStateOf(vm.settings.remoteVaultPassword()) }
+    var vaultStatus by remember { mutableStateOf<String?>(null) }
+    var vaultSyncing by remember { mutableStateOf(false) }
+    var showVaultSyncConfirm by remember { mutableStateOf(false) }
+
     val nowMs = System.currentTimeMillis()
     val allKeys = remember(keyRevision) { vm.settings.keyManager.allKeys() }
     val providerKeys = remember(keyRevision, selectedProvider) { vm.settings.keyManager.keysFor(selectedProvider) }
@@ -138,6 +145,105 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Remote API Key Vault", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Store provider keys in your private web vault, then manually sync them to this phone. The app re-encrypts imported keys with Android Keystore. AI requests still run directly from your phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = vaultUrl,
+                        onValueChange = { vaultUrl = it.trim() },
+                        label = { Text("Vault website URL") },
+                        placeholder = { Text("https://your-vault.vercel.app") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("remote_vault_url_field"),
+                    )
+                    OutlinedTextField(
+                        value = vaultPassword,
+                        onValueChange = { vaultPassword = it },
+                        label = { Text("Vault password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("remote_vault_password_field"),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            enabled = vaultUrl.startsWith("https://") && vaultPassword.length >= 16,
+                            onClick = {
+                                vm.settings.remoteVaultUrl = vaultUrl
+                                vaultStatus = when (val saved = vm.settings.setRemoteVaultPassword(vaultPassword)) {
+                                    is AppResult.Success -> "Vault connection saved securely on this phone."
+                                    is AppResult.Failure -> "Could not save vault password: ${saved.error.message}"
+                                }
+                            },
+                        ) { Text("Save connection") }
+                        Button(
+                            enabled = !vaultSyncing && vaultUrl.startsWith("https://") && vaultPassword.length >= 16,
+                            onClick = { showVaultSyncConfirm = true },
+                        ) { Text(if (vaultSyncing) "Syncing…" else "Replace & Sync") }
+                    }
+                    vaultStatus?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            if (showVaultSyncConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showVaultSyncConfirm = false },
+                    title = { Text("Replace local API keys?") },
+                    text = {
+                        Text("This replaces all Gemini, Groq and Claude keys saved on this phone with the current contents of your remote vault. Key health and cooldown history will reset. Continue?")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = !vaultSyncing,
+                            onClick = {
+                                showVaultSyncConfirm = false
+                                vaultSyncing = true
+                                vaultStatus = "Connecting to remote vault…"
+                                vm.settings.remoteVaultUrl = vaultUrl
+                                scope.launch {
+                                    try {
+                                        when (val saved = vm.settings.setRemoteVaultPassword(vaultPassword)) {
+                                            is AppResult.Success -> Unit
+                                            is AppResult.Failure -> throw IllegalStateException(saved.error.message)
+                                        }
+                                        val remoteKeys = RemoteKeyVaultClient(vaultUrl, vaultPassword).fetchKeys()
+                                        ProviderId.entries.forEach { vm.settings.keyManager.clearProvider(it) }
+                                        remoteKeys.forEach { remote ->
+                                            val added = vm.settings.keyManager.addKey(
+                                                providerId = remote.providerId,
+                                                name = remote.name,
+                                                rawKey = remote.key,
+                                                setPreferred = remote.isPreferred,
+                                            )
+                                            val record = when (added) {
+                                                is AppResult.Success -> added.value
+                                                is AppResult.Failure -> throw IllegalStateException(added.error.message)
+                                            }
+                                            if (!remote.enabled) vm.settings.keyManager.setEnabled(record.id, false)
+                                            if (remote.isPreferred) vm.settings.keyManager.setPreferred(record.id)
+                                        }
+                                        vaultStatus = "Synced ${remoteKeys.size} key(s). Keys are now encrypted on this device."
+                                    } catch (error: Exception) {
+                                        vaultStatus = error.message ?: "Vault sync failed."
+                                    } finally {
+                                        vaultSyncing = false
+                                    }
+                                }
+                            },
+                        ) { Text("Replace and sync") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showVaultSyncConfirm = false }) { Text("Cancel") }
+                    },
+                )
+            }
 
             val secError = vm.settings.keyManager.migrationError ?: vm.settings.lastSecurityError
             if (!secError.isNullOrBlank()) {
