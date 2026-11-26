@@ -971,11 +971,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val s = EditorMediaHelper.analyzeSong(ctx, uri, name)
             if (s == null) { status = "Couldn't read that audio file. Try another song."; return@launch }
             song = s
+            libSong = null
             musicSource = MusicSource.MY_SONG
             musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
             attachSongToTimeline(s)
-            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM). Your music taste profile has been updated." else "Song ready. Your music taste profile has been updated."
             musicTasteProfile = buildMusicTasteProfile(s)
+            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM). Taste profile updated." else "Song ready. Taste profile updated."
         }
     }
 
@@ -1037,7 +1038,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val s = loadLibraryTrack(t)
                 libSong = s
                 musicSource = MusicSource.LIBRARY
+                song = null
                 musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
+                musicTasteProfile = buildMusicTasteProfile(s)
                 attachSongToTimeline(s)
                 libError = null
             } catch (e: Exception) {
