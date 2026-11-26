@@ -1,4 +1,3 @@
-
 name: Android Build & APK Delivery
 
 on:
@@ -32,14 +31,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools,platforms;android-36,build-tools;36.0.0"
 
-      - name: Install Android SDK packages
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -172,3 +168,4 @@ jobs:
             echo "| Debug | ${DEBUG_BYTES:-N/A} | \`${DEBUG_SHA:-N/A}\` |"
             echo "| Release | ${RELEASE_BYTES:-N/A} | \`${RELEASE_SHA:-N/A}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
+          
