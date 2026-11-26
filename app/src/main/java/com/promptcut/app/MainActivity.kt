@@ -204,6 +204,18 @@ fun EditorScreen(vm: EditorViewModel) {
                 .padding(horizontal = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            // Source footage controls: examples are never inserted into the output.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = pickVideos, modifier = Modifier.weight(1f)) { Text(if (vm.clips.isEmpty()) "Add footage" else "Add more footage") }
+                OutlinedButton(onClick = pickReferenceVideo, modifier = Modifier.weight(1f)) { Text("Add example video") }
+            }
+            vm.referenceVideoName?.let { name ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Style reference: $name", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = { vm.clearReferenceVideo() }) { Text("Remove") }
+                }
+            }
+            
             // Reference video is style guidance only. It is never part of the export footage.
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
