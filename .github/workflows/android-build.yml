@@ -1,3 +1,4 @@
+
 name: Android CI & Artifact Build
 
 on:
@@ -31,23 +32,16 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          packages: |
-            platform-tools
-            platforms;android-36
-            build-tools;36.0.0
 
-      - name: Accept Android SDK licenses and verify SDK 36 packages
+      - name: Accept licenses and install SDK packages
         run: |
-          set +o pipefail
-          yes | sdkmanager --licenses
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
           SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          if [ ! -d "$SDK_DIR/platforms/android-36" ] || [ ! -d "$SDK_DIR/build-tools/36.0.0" ]; then
-            sdkmanager --install \
-              "platform-tools" \
-              "platforms;android-36" \
-              "build-tools;36.0.0"
-          fi
           test -d "$SDK_DIR/platforms/android-36"
           test -d "$SDK_DIR/build-tools/36.0.0"
 
@@ -57,7 +51,7 @@ jobs:
           gradle-version: wrapper
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Validate Gradle wrapper and build tasks
+      - name: Validate Gradle wrapper
         run: |
           test -f gradlew
           test -f gradle/wrapper/gradle-wrapper.properties
@@ -85,16 +79,15 @@ jobs:
             test -s "$KEYSTORE_PATH"
             echo "RELEASE_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
             echo "RELEASE_SIGNED=true" >> "$GITHUB_ENV"
-            echo "Release signing configured in runner temp directory."
           else
             echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
-            echo "Release signing secrets not configured; skipping signed release build."
+            echo "Release signing secrets not configured; skipping release build."
           fi
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Build Signed Release APK & Play App Bundle
+      - name: Build Signed Release APK & App Bundle
         if: env.RELEASE_SIGNED == 'true'
         env:
           RELEASE_KEYSTORE_PATH: ${{ env.RELEASE_KEYSTORE_PATH }}
@@ -103,7 +96,7 @@ jobs:
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: ./gradlew assembleRelease bundleRelease --stacktrace --no-daemon
 
-      - name: Verify APKs & generate checksums
+      - name: Verify APKs and generate checksums
         run: |
           APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner"
           mkdir -p build/apk-deliverables
@@ -112,8 +105,10 @@ jobs:
           test -s "$DEBUG_SRC"
           "$APKSIGNER" verify --verbose "$DEBUG_SRC"
           cp "$DEBUG_SRC" build/apk-deliverables/PromptCut-debug.apk
+
           DEBUG_BYTES=$(wc -c < build/apk-deliverables/PromptCut-debug.apk)
           DEBUG_SHA=$(sha256sum build/apk-deliverables/PromptCut-debug.apk | awk '{print $1}')
+
           {
             echo "DEBUG_BYTES=$DEBUG_BYTES"
             echo "DEBUG_SHA=$DEBUG_SHA"
@@ -122,15 +117,19 @@ jobs:
           if [ "${RELEASE_SIGNED:-false}" = "true" ]; then
             RELEASE_SRC="app/build/outputs/apk/release/app-release.apk"
             AAB_SRC="app/build/outputs/bundle/release/app-release.aab"
+
             test -s "$RELEASE_SRC"
             test -s "$AAB_SRC"
             "$APKSIGNER" verify --verbose "$RELEASE_SRC"
+
             cp "$RELEASE_SRC" build/apk-deliverables/PromptCut-release.apk
             cp "$AAB_SRC" build/apk-deliverables/PromptCut-release.aab
+
             RELEASE_BYTES=$(wc -c < build/apk-deliverables/PromptCut-release.apk)
             RELEASE_SHA=$(sha256sum build/apk-deliverables/PromptCut-release.apk | awk '{print $1}')
             AAB_BYTES=$(wc -c < build/apk-deliverables/PromptCut-release.aab)
             AAB_SHA=$(sha256sum build/apk-deliverables/PromptCut-release.aab | awk '{print $1}')
+
             {
               echo "RELEASE_BYTES=$RELEASE_BYTES"
               echo "RELEASE_SHA=$RELEASE_SHA"
@@ -140,8 +139,7 @@ jobs:
           fi
 
           (
-            cd build/apk-deliverables &&
-            rm -f SHA256SUMS.txt &&
+            cd build/apk-deliverables
             find . -maxdepth 1 -type f \( -name '*.apk' -o -name '*.aab' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS.txt
           )
 
@@ -154,11 +152,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PromptCut-Test-Reports
-          path: app/build/reports/tests/
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload Debug APK artifact
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: PromptCut-Debug-APK
@@ -168,7 +168,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload Signed Release APK & AAB artifacts
+      - name: Upload Signed Release APK and AAB
         if: env.RELEASE_SIGNED == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -188,17 +188,18 @@ jobs:
           {
             echo "## PromptCut CI Build Summary"
             echo ""
-            echo "- **Branch/Ref:** \`${GITHUB_REF_NAME}\`"
-            echo "- **Commit:** \`${GITHUB_SHA}\`"
+            echo "- **Branch:** ${GITHUB_REF_NAME}"
+            echo "- **Commit:** ${GITHUB_SHA}"
             echo "- **Release signing configured:** ${RELEASE_SIGNED:-false}"
             echo ""
             echo "| Artifact | Size (bytes) | SHA-256 |"
             echo "|---|---:|---|"
-            echo "| Debug APK | ${DEBUG_BYTES:-N/A} | \`${DEBUG_SHA:-N/A}\` |"
+            echo "| Debug APK | ${DEBUG_BYTES:-N/A} | ${DEBUG_SHA:-N/A} |"
+
             if [ "${RELEASE_SIGNED:-false}" = "true" ]; then
-              echo "| Release APK | ${RELEASE_BYTES:-N/A} | \`${RELEASE_SHA:-N/A}\` |"
-              echo "| Release AAB | ${AAB_BYTES:-N/A} | \`${AAB_SHA:-N/A}\` |"
+              echo "| Release APK | ${RELEASE_BYTES:-N/A} | ${RELEASE_SHA:-N/A} |"
+              echo "| Release AAB | ${AAB_BYTES:-N/A} | ${AAB_SHA:-N/A} |"
             else
-              echo "| Release APK / AAB | Skipped (secrets not set) | N/A |"
+              echo "| Release APK / AAB | Skipped: signing secrets not configured | N/A |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
