@@ -54,7 +54,7 @@ function decrypt(payload) {
 }
 
 async function readKeys() {
-  const stored = await get(VAULT_PATH, { access: 'private' });
+  const stored = await get(VAULT_PATH, { access: 'private', useCache: false });
   if (!stored || stored.statusCode !== 200) return [];
   const payload = await new Response(stored.stream).text();
   return JSON.parse(decrypt(payload));
