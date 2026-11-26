@@ -26,14 +26,17 @@ enum class ExportResolution(val label: String, val shortEdge: Int) {
  * Multi-key credentials stay on this phone only, encrypted via Android Keystore ([KeyVault])
  * and managed through [ApiKeyManager] with zero plaintext fallback.
  */
+const val DEFAULT_REMOTE_KEY_VAULT_URL = "https://promptcut-key-vault.vercel.app"
+
 class Settings(context: Context, private val vault: KeyVault = KeyVault()) {
     private val prefs = context.getSharedPreferences("promptcut", Context.MODE_PRIVATE)
     val privacy = PrivacyManager(prefs)
     val keyManager = ApiKeyManager(prefs, vault)
 
-    /** Optional remote vault URL. API credentials themselves remain encrypted on this device. */
+    /** Remote vault URL defaults to the hosted PromptCut vault; credentials remain encrypted on-device. */
     var remoteVaultUrl: String
-        get() = prefs.getString("remote_vault_url", "") ?: ""
+        get() = prefs.getString("remote_vault_url", null)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_REMOTE_KEY_VAULT_URL
         set(value) = prefs.edit().putString("remote_vault_url", value.trim().trimEnd('/')).apply()
 
     fun remoteVaultPassword(): String =
