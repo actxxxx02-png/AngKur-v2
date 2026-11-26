@@ -21,11 +21,13 @@ data class ClipMeta(
 
 enum class Aspect(val key: String, val width: Int, val height: Int, val label: String) {
     PORTRAIT("9:16", 1080, 1920, "Reel 9:16"),
+    PORTRAIT_4_5("4:5", 1080, 1350, "Feed 4:5"),
     LANDSCAPE("16:9", 1920, 1080, "Wide 16:9"),
-    SQUARE("1:1", 1080, 1080, "Square 1:1");
+    SQUARE("1:1", 1080, 1080, "Square 1:1"),
+    CUSTOM("custom", 1080, 1920, "Custom");
 
     companion object {
-        fun from(value: String?): Aspect = entries.firstOrNull { it.key == value?.trim() } ?: PORTRAIT
+        fun from(value: String?): Aspect = entries.firstOrNull { it.key.equals(value?.trim(), ignoreCase = true) } ?: PORTRAIT
     }
 }
 

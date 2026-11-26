@@ -2,8 +2,15 @@ package com.promptcut.app
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -13,17 +20,19 @@ import android.text.SpannableString
 import android.text.style.AbsoluteSizeSpan
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
-import android.text.style.StyleSpan
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.OverlaySettings
+import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.SpeedProvider
+import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.common.OverlaySettings
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
@@ -41,11 +50,20 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.google.common.collect.ImmutableList
+import com.promptcut.app.audio.AudioStudioProcessor
+import com.promptcut.app.intelligence.CaptionTools
+import com.promptcut.app.render.DeviceCapabilities
+import com.promptcut.app.render.ExportDiagnostics
 import com.promptcut.app.render.ExportSettings
+import com.promptcut.app.render.ExportVerificationResult
 import com.promptcut.app.render.RenderCheckpoint
+import com.promptcut.app.timeline.AudioTrackType
+import com.promptcut.app.timeline.CaptionAnimation
+import com.promptcut.app.timeline.CaptionFont
 import com.promptcut.app.timeline.CaptionItem
 import com.promptcut.app.timeline.CaptionStyle
 import com.promptcut.app.timeline.TimelineProject
+import com.promptcut.app.timeline.VideoClipItem
 import com.promptcut.app.timeline.usToSec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -58,9 +76,9 @@ import kotlin.coroutines.resumeWithException
 class RenderException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /**
- * Turns an [EditPlan] or [TimelineProject] into an MP4 on the phone using Media3 Transformer.
- * Preserves the legacy [render] entrypoint while adding [renderProject] for 720p/1080p settings,
- * FPS, bitrate, timed caption overlays, and checkpointed safe-mode recovery.
+ * Turns an [EditPlan] or [TimelineProject] into a verified MP4 on the phone using Media3 Transformer.
+ * Supports V1/V2 video compositing, OpenGL ES per-clip shader effects, speed ramps, keyframes,
+ * rich bitmap-rendered captions, multi-track A1/A2/A3 audio mixing, HEVC/H.264, and Safe Render recovery.
  */
 @OptIn(UnstableApi::class)
 object Renderer {
@@ -96,14 +114,41 @@ object Renderer {
         exportSettings: ExportSettings = ExportSettings(),
         onStatus: (String) -> Unit = {},
         onProgress: (Int) -> Unit,
-    ): File {
+    ): File = renderProjectWithDiagnostics(
+        context = context,
+        project = project,
+        clips = clips,
+        music = music,
+        exportSettings = exportSettings,
+        onStatus = onStatus,
+        onProgress = onProgress,
+    ).first
+
+    suspend fun renderProjectWithDiagnostics(
+        context: Context,
+        project: TimelineProject,
+        clips: List<Clip>,
+        music: MusicMux.Source?,
+        exportSettings: ExportSettings = ExportSettings(),
+        onStatus: (String) -> Unit = {},
+        onProgress: (Int) -> Unit,
+    ): Pair<File, ExportDiagnostics> {
+        val startMs = System.currentTimeMillis()
         val plan = project.toEditPlan()
+        val effectiveSettings = exportSettings.copy(
+            customAspectWidth = project.customAspectWidth,
+            customAspectHeight = project.customAspectHeight,
+        )
+        val caps = DeviceCapabilities.probe(context)
+        val useHevc = effectiveSettings.useHevc && caps.supportsHevc
+        val codecLabel = if (useHevc) "H.265 (HEVC)" else "H.264 (AVC)"
+        val (outW, outH) = effectiveSettings.outputDimensions(plan.aspect)
+
         val dir = File(context.cacheDir, "render").apply { mkdirs() }
         val checkpointFile = File(dir, "checkpoint.json")
-        val planHash = "${project.id}:${plan.toJson().hashCode()}:${exportSettings.resolution}:${exportSettings.fps}:${exportSettings.videoBitrateBps}"
+        val planHash = "${project.id}:${plan.toJson().hashCode()}:${effectiveSettings.resolution}:${effectiveSettings.fps}:${effectiveSettings.videoBitrateBps}:$useHevc"
         val out = File(dir, "promptcut_${System.currentTimeMillis()}.mp4")
 
-        // Clean stale MP4 artifacts from unrelated projects while preserving resumable parts for identical hash.
         val existingCp = RenderCheckpoint.loadFrom(checkpointFile, project.id, planHash)
         if (existingCp == null) {
             dir.listFiles()?.forEach { it.delete() }
@@ -111,15 +156,19 @@ object Renderer {
             dir.listFiles()?.filter { it.name.startsWith("promptcut_") || it.name.startsWith("final_") }?.forEach { it.delete() }
         }
 
+        val hasExtraAudio = music != null || project.audioTracks.any { !it.muted && it.items.isNotEmpty() }
+        var usedSafeMode = effectiveSettings.forceSafeMode
+
         val video = run {
-            if (!exportSettings.forceSafeMode) {
+            if (!effectiveSettings.forceSafeMode) {
                 try {
                     export(
                         context = context,
-                        composition = fullComposition(plan, project, clips, exportSettings),
+                        composition = fullComposition(plan, project, clips, effectiveSettings),
                         out = out,
-                        exportSettings = exportSettings,
-                    ) { p -> onProgress(if (music != null) p * 9 / 10 else p) }
+                        exportSettings = effectiveSettings,
+                        useHevc = useHevc,
+                    ) { p -> onProgress(if (hasExtraAudio) p * 9 / 10 else p) }
                     checkpointFile.delete()
                     return@run out
                 } catch (e: CancellationException) {
@@ -129,6 +178,7 @@ object Renderer {
                     out.delete()
                 }
             }
+            usedSafeMode = true
             onStatus("Rendering shot by shot (safe mode)…")
             renderSafe(
                 context = context,
@@ -137,39 +187,139 @@ object Renderer {
                 clips = clips,
                 dir = dir,
                 out = out,
-                exportSettings = exportSettings,
+                exportSettings = effectiveSettings,
+                useHevc = useHevc,
                 checkpointFile = checkpointFile,
                 initialCheckpoint = existingCp ?: RenderCheckpoint(project.id, planHash, plan.segments.size),
                 onStatus = onStatus,
-            ) { p -> onProgress(if (music != null) p * 9 / 10 else p) }
+            ) { p -> onProgress(if (hasExtraAudio) p * 9 / 10 else p) }
         }
 
-        if (music == null) return video
-
-        onStatus("Adding music…")
-        val withMusic = File(dir, "final_${System.currentTimeMillis()}.mp4")
-        return try {
-            withContext(Dispatchers.Default) {
-                MusicMux.addMusic(context, video, music, plan.musicVolume.toFloat(), withMusic)
-            }
-            onProgress(100)
-            video.delete()
-            withMusic
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Adding music failed", e)
-            withMusic.delete()
-            onStatus("Couldn't add the music on this phone; here's the video with its own sound.")
+        val finalVideo = if (!hasExtraAudio) {
             video
+        } else {
+            onStatus("Mixing audio tracks…")
+            val mixedOut = File(dir, "final_${System.currentTimeMillis()}.mp4")
+            try {
+                withContext(Dispatchers.Default) {
+                    MusicMux.mixTimelineAudio(
+                        context = context,
+                        video = video,
+                        project = project,
+                        music = music,
+                        audioBitrateBps = effectiveSettings.audioBitrateBps,
+                        out = mixedOut,
+                    )
+                }
+                onProgress(100)
+                video.delete()
+                mixedOut
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio mixing failed, falling back to base audio", e)
+                mixedOut.delete()
+                onStatus("Couldn't mix external audio on this device; kept clip audio.")
+                video
+            }
+        }
+
+        // Clean up any leftover intermediate artifacts
+        dir.listFiles()?.filter { it != finalVideo && (it.name.startsWith("part_") || it.name.startsWith("promptcut_") && it != finalVideo) }
+            ?.forEach { it.delete() }
+
+        val verification = verifyExportedMp4(
+            file = finalVideo,
+            expectAudio = hasExtraAudio || project.mainVideoTrack.items.any { !it.muted && it.volume > 0.02f },
+        )
+        if (!verification.valid) {
+            throw RenderException(verification.errorReason ?: "Exported MP4 failed verification.")
+        }
+
+        val diag = ExportDiagnostics(
+            codec = codecLabel,
+            width = verification.width.takeIf { it > 0 } ?: outW,
+            height = verification.height.takeIf { it > 0 } ?: outH,
+            fps = effectiveSettings.fps,
+            videoBitrateBps = effectiveSettings.videoBitrateBps,
+            audioBitrateBps = effectiveSettings.audioBitrateBps,
+            durationMs = verification.durationMs,
+            fileSizeBytes = verification.fileSizeBytes,
+            hasVideoTrack = verification.hasVideoTrack,
+            hasAudioTrack = verification.hasAudioTrack,
+            renderTimeMs = System.currentTimeMillis() - startMs,
+            usedSafeMode = usedSafeMode,
+            verifiedOk = verification.valid,
+        )
+        return finalVideo to diag
+    }
+
+    fun verifyExportedMp4(file: File, expectAudio: Boolean): ExportVerificationResult {
+        if (!file.exists() || file.length() < 8_192L) {
+            return ExportVerificationResult(false, false, false, 0L, 0, 0, file.length(), "Output file is empty or corrupted.")
+        }
+        val ex = MediaExtractor()
+        var hasVideo = false
+        var hasAudio = false
+        var durationMs = 0L
+        var width = 0
+        var height = 0
+        try {
+            ex.setDataSource(file.absolutePath)
+            for (i in 0 until ex.trackCount) {
+                val fmt = ex.getTrackFormat(i)
+                val mime = fmt.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("video/")) {
+                    hasVideo = true
+                    if (fmt.containsKey(MediaFormat.KEY_WIDTH)) width = fmt.getInteger(MediaFormat.KEY_WIDTH)
+                    if (fmt.containsKey(MediaFormat.KEY_HEIGHT)) height = fmt.getInteger(MediaFormat.KEY_HEIGHT)
+                    if (fmt.containsKey(MediaFormat.KEY_DURATION)) {
+                        durationMs = maxOf(durationMs, fmt.getLong(MediaFormat.KEY_DURATION) / 1000L)
+                    }
+                } else if (mime.startsWith("audio/")) {
+                    hasAudio = true
+                }
+            }
+            if (!hasVideo) {
+                return ExportVerificationResult(false, false, hasAudio, durationMs, width, height, file.length(), "Rendered MP4 contains no video track.")
+            }
+            if (durationMs <= 100L) {
+                val r = MediaMetadataRetriever()
+                runCatching {
+                    r.setDataSource(file.absolutePath)
+                    durationMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: durationMs
+                }
+                r.release()
+            }
+            if (expectAudio && !hasAudio) {
+                Log.w(TAG, "Verified MP4 missing optional audio track")
+            }
+            return ExportVerificationResult(
+                valid = hasVideo && durationMs > 0L,
+                hasVideoTrack = hasVideo,
+                hasAudioTrack = hasAudio,
+                durationMs = durationMs,
+                width = width,
+                height = height,
+                fileSizeBytes = file.length(),
+            )
+        } catch (e: Exception) {
+            return ExportVerificationResult(false, false, false, 0L, 0, 0, file.length(), "Could not read exported MP4 container: ${e.message}")
+        } finally {
+            ex.release()
         }
     }
 
     // ------------------------------------------------------------------ building blocks
 
-    private fun speedProvider(speed: Double) = object : SpeedProvider {
-        override fun getSpeed(timeUs: Long) = speed.toFloat()
-        override fun getNextSpeedChangeTimeUs(timeUs: Long) = C.TIME_UNSET
+    private fun speedProviderFor(item: VideoClipItem?, fallbackSpeed: Double): SpeedProvider {
+        if (item != null && item.speedRamp.size >= 2) {
+            return SpeedRampProvider(fallbackSpeed, item.speedRamp, item.sourceDurationUs)
+        }
+        return object : SpeedProvider {
+            override fun getSpeed(timeUs: Long) = fallbackSpeed.toFloat().coerceIn(0.25f, 4.0f)
+            override fun getNextSpeedChangeTimeUs(timeUs: Long) = C.TIME_UNSET
+        }
     }
 
     private fun clipped(uri: Uri, startSec: Double, endSec: Double?): MediaItem =
@@ -192,19 +342,29 @@ object Renderer {
         timelineStartUs: Long,
         keepClipSound: Boolean,
         exportSettings: ExportSettings,
+        includeShaders: Boolean = true,
     ): EditedMediaItem {
         val video = mutableListOf<Effect>()
         val audio = mutableListOf<AudioProcessor>()
-        val soundOn = keepClipSound && clip.meta.hasAudio
+        val timelineItem = project.mainVideoTrack.items.getOrNull(index)
+        val soundOn = keepClipSound && clip.meta.hasAudio && !project.mainVideoTrack.muted
+
         if (soundOn) {
-            val g = plan.originalVolume * seg.soundGain
-            if (g < 0.99) audio += GainProcessor(g.toFloat())
+            val g = (plan.originalVolume * seg.soundGain).toFloat()
+            val v1Track = project.mainVideoTrack
+            val audioTrackForGain = project.audioTracks.firstOrNull { it.type == AudioTrackType.VOICEOVER }
+            if (g < 0.99f || audioTrackForGain?.voiceEnhance == true) {
+                audio += AudioStudioProcessor(
+                    gain = g.coerceIn(0f, 1.5f),
+                    voiceEnhance = audioTrackForGain?.voiceEnhance == true,
+                    normalizeTargetDb = audioTrackForGain?.normalizeTargetDb,
+                )
+            }
             audio += FadeProcessor(seg.outputSec, 0.03, 0.06)
         }
 
         video += FrameDropEffect.createDefaultFrameDropEffect(exportSettings.fps.toFloat())
         val (outW, outH) = exportSettings.outputDimensions(plan.aspect)
-        val timelineItem = project.mainVideoTrack.items.getOrNull(index)
         val userCrop = timelineItem?.crop ?: clip.meta.crop
         if (userCrop != null) {
             video += androidx.media3.effect.Crop(
@@ -219,6 +379,9 @@ object Renderer {
 
         val look = timelineItem?.colorLookOverride ?: plan.color
         video += Looks.effects(look)
+        if (timelineItem != null) {
+            video += Looks.buildClipAdjustments(timelineItem, includeShaders = includeShaders)
+        }
 
         fun continues(a: Segment?, b: Segment?) =
             a != null && b != null && a.clip == b.clip && b.start >= a.end - 0.01 && b.start - a.end < 8.0
@@ -233,18 +396,23 @@ object Renderer {
 
         if (index == 0 && plan.title != null) video += titleOverlay(plan.title)
 
-        if (exportSettings.burnCaptions) {
+        if (exportSettings.burnCaptions && project.mainCaptionTrack.visible) {
             val segEndUs = timelineStartUs + (seg.outputSec * 1_000_000.0).toLong()
             val overlappingCaptions = project.mainCaptionTrack.items.filter { c ->
                 c.endUs > timelineStartUs && c.startUs < segEndUs
             }
             if (overlappingCaptions.isNotEmpty()) {
-                video += timedCaptionOverlay(timelineStartUs, overlappingCaptions)
+                video += timedCaptionOverlay(timelineStartUs, outW, outH, overlappingCaptions)
             }
         }
 
+        val spProvider = speedProviderFor(timelineItem, seg.speed)
         return EditedMediaItem.Builder(clipped(clip.uri, seg.start, seg.end))
-            .apply { if (seg.speed != 1.0) setSpeed(speedProvider(seg.speed)) }
+            .apply {
+                if (seg.speed != 1.0 || (timelineItem?.speedRamp?.size ?: 0) >= 2) {
+                    setSpeed(spProvider)
+                }
+            }
             .setRemoveAudio(!soundOn)
             .setEffects(Effects(audio, video))
             .build()
@@ -284,17 +452,72 @@ object Renderer {
         var cursorUs = 0L
         val items = plan.segments.mapIndexedNotNull { i, seg ->
             val clip = byIndex[seg.clip] ?: return@mapIndexedNotNull null
-            val item = shotItem(plan, project, seg, clip, i, cursorUs, keepClipSound, exportSettings)
+            val item = shotItem(plan, project, seg, clip, i, cursorUs, keepClipSound, exportSettings, includeShaders = true)
             cursorUs += (seg.outputSec * 1_000_000.0).toLong()
             item
         }
-        val sequence = EditedMediaItemSequence.Builder(items)
+        val mainSeq = EditedMediaItemSequence.Builder(items)
             .experimentalSetForceAudioTrack(keepClipSound)
             .build()
-        return Composition.Builder(sequence)
+
+        val sequences = mutableListOf(mainSeq)
+
+        // Optional V2 Picture-in-Picture / B-Roll overlay sequence
+        val v2Track = project.overlayVideoTrack
+        if (v2Track != null && v2Track.visible && v2Track.items.isNotEmpty()) {
+            val (outW, outH) = exportSettings.outputDimensions(plan.aspect)
+            val v2Builder = EditedMediaItemSequence.Builder(emptyList())
+            var v2Cursor = 0L
+            var addedCount = 0
+            v2Track.items.sortedBy { it.timelineStartUs }.forEach { ov ->
+                val clip = byIndex[ov.sourceClipIndex] ?: return@forEach
+                val gap = (ov.timelineStartUs - v2Cursor).coerceAtLeast(0L)
+                if (gap > 10_000L) v2Builder.addGap(gap)
+                val bounds = ov.overlayBounds ?: com.promptcut.app.timeline.OverlayBounds()
+                val ovW = ((outW * bounds.widthFraction).toInt().coerceIn(64, outW) / 2) * 2
+                val ovH = ((outH * bounds.widthFraction).toInt().coerceIn(64, outH) / 2) * 2
+                val ovEffects = mutableListOf<Effect>(
+                    Presentation.createForWidthAndHeight(ovW, ovH, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP)
+                )
+                ovEffects += Looks.buildClipAdjustments(ov, includeShaders = true)
+                val editedOv = EditedMediaItem.Builder(
+                    clipped(clip.uri, usToSec(ov.sourceStartUs), usToSec(ov.sourceEndUs))
+                )
+                    .setRemoveAudio(true)
+                    .setEffects(Effects(emptyList(), ovEffects))
+                    .build()
+                v2Builder.addItem(editedOv)
+                v2Cursor = ov.timelineEndUs
+                addedCount++
+            }
+            if (addedCount > 0) {
+                sequences += v2Builder.build()
+            }
+        }
+
+        val compBuilder = Composition.Builder(sequences)
             .apply { if (clips.any { it.isHdr }) setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL) }
             .setEffects(Effects(listOf(FadeProcessor(plan.totalSec)), emptyList()))
-            .build()
+
+        if (sequences.size > 1) {
+            compBuilder.setVideoCompositorSettings(object : VideoCompositorSettings {
+                override fun getOutputSize(inputSizes: List<Size>): Size = inputSizes.first()
+                override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+                    if (inputId == 0) return StaticOverlaySettings.Builder().build()
+                    val ov = project.activeOverlaysAt(presentationTimeUs).firstOrNull()
+                        ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+                    val b = ov.overlayBounds ?: com.promptcut.app.timeline.OverlayBounds()
+                    val anchorX = ((b.x + b.widthFraction * 0.5f) * 2f - 1f).coerceIn(-0.95f, 0.95f)
+                    val anchorY = (1f - (b.y + b.widthFraction * 0.35f) * 2f).coerceIn(-0.95f, 0.95f)
+                    return StaticOverlaySettings.Builder()
+                        .setBackgroundFrameAnchor(anchorX, anchorY)
+                        .setOverlayFrameAnchor(0f, 0f)
+                        .setAlphaScale(b.opacity.coerceIn(0.05f, 1f))
+                        .build()
+                }
+            })
+        }
+        return compBuilder.build()
     }
 
     // ------------------------------------------------------------------ safe mode + checkpoint
@@ -307,6 +530,7 @@ object Renderer {
         dir: File,
         out: File,
         exportSettings: ExportSettings,
+        useHevc: Boolean,
         checkpointFile: File,
         initialCheckpoint: RenderCheckpoint,
         onStatus: (String) -> Unit,
@@ -334,30 +558,28 @@ object Renderer {
 
             onStatus("Rendering shot ${i + 1} of $n (safe mode)…")
             val scale: (Int) -> Unit = { p -> onProgress((i * 100 + p) * 80 / (n * 100).coerceAtLeast(1)) }
-            fun single(seg: Segment) = Composition.Builder(
+            fun single(seg: Segment, withShaders: Boolean) = Composition.Builder(
                 EditedMediaItemSequence.Builder(
-                    listOf(shotItem(plan, project, seg, clip, i, segStartUs, keepClipSound && clip.meta.hasAudio, exportSettings))
+                    listOf(shotItem(plan, project, seg, clip, i, segStartUs, keepClipSound && clip.meta.hasAudio, exportSettings, includeShaders = withShaders))
                 )
                     .experimentalSetForceAudioTrack(true)
                     .build()
             ).apply { if (clip.isHdr) setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL) }.build()
 
             val ok = try {
-                export(context, single(seg0), part, exportSettings, scale); true
+                export(context, single(seg0, withShaders = true), part, exportSettings, useHevc = false, scale); true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Shot $i failed, retrying without speed change", e)
-                if (seg0.speed != 1.0) {
-                    val plain = seg0.copy(end = (seg0.start + seg0.outputSec).coerceAtMost(clip.meta.durationSec), speed = 1.0)
-                    try {
-                        export(context, single(plain), part, exportSettings, scale); true
-                    } catch (e2: CancellationException) {
-                        throw e2
-                    } catch (_: Exception) {
-                        false
-                    }
-                } else false
+                Log.w(TAG, "Shot $i failed, retrying safe fallback without GL shaders", e)
+                val plain = seg0.copy(end = (seg0.start + seg0.outputSec).coerceAtMost(clip.meta.durationSec), speed = 1.0)
+                try {
+                    export(context, single(plain, withShaders = false), part, exportSettings, useHevc = false, scale); true
+                } catch (e2: CancellationException) {
+                    throw e2
+                } catch (_: Exception) {
+                    false
+                }
             }
             if (ok) {
                 parts += part
@@ -375,7 +597,7 @@ object Renderer {
             .setEffects(Effects(listOf(FadeProcessor(plan.totalSec)), emptyList()))
             .build()
         try {
-            export(context, finalComp, out, exportSettings) { p -> onProgress(80 + p / 5) }
+            export(context, finalComp, out, exportSettings, useHevc = false) { p -> onProgress(80 + p / 5) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -394,6 +616,7 @@ object Renderer {
         composition: Composition,
         out: File,
         exportSettings: ExportSettings,
+        useHevc: Boolean,
         onProgress: (Int) -> Unit,
     ) = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { cont ->
@@ -406,6 +629,7 @@ object Renderer {
                     handler.postDelayed(this, 300)
                 }
             }
+            val mime = if (useHevc) MimeTypes.VIDEO_H265 else MimeTypes.VIDEO_H264
             transformer = Transformer.Builder(context)
                 .setEncoderFactory(
                     DefaultEncoderFactory.Builder(context)
@@ -417,7 +641,7 @@ object Renderer {
                         )
                         .build()
                 )
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setVideoMimeType(mime)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .setMaxDelayBetweenMuxerSamplesMs(MUXER_PATIENCE_MS)
                 .addListener(object : Transformer.Listener {
@@ -452,40 +676,154 @@ object Renderer {
         return OverlayEffect(ImmutableList.of<TextureOverlay>(TextOverlay.createStaticTextOverlay(text, settings)))
     }
 
-    private fun timedCaptionOverlay(shotTimelineStartUs: Long, captions: List<CaptionItem>): OverlayEffect {
-        val settings = StaticOverlaySettings.Builder()
-            .setBackgroundFrameAnchor(0f, -0.72f)
-            .build()
-        val overlay = object : TextOverlay() {
+    private fun timedCaptionOverlay(
+        shotTimelineStartUs: Long,
+        outWidth: Int,
+        outHeight: Int,
+        captions: List<CaptionItem>,
+    ): OverlayEffect {
+        val emptyBmp = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+        val bitmapCache = HashMap<String, Bitmap>()
+        val overlay = object : BitmapOverlay() {
             private var firstPtsUs = Long.MIN_VALUE
 
-            override fun getText(presentationTimeUs: Long): SpannableString {
+            override fun getBitmap(presentationTimeUs: Long): Bitmap {
+                if (firstPtsUs == Long.MIN_VALUE || presentationTimeUs < firstPtsUs) {
+                    firstPtsUs = presentationTimeUs
+                }
+                val globalUs = shotTimelineStartUs + (presentationTimeUs - firstPtsUs)
+                val active = captions.firstOrNull { globalUs in it.startUs..it.endUs } ?: return emptyBmp
+                val key = "${active.id}_${active.text}_${active.style}_${active.font}_${active.fontSizeSp}_${active.bgAlpha}"
+                return bitmapCache.getOrPut(key) {
+                    renderCaptionBitmap(active, outWidth)
+                }
+            }
+
+            override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
                 if (firstPtsUs == Long.MIN_VALUE || presentationTimeUs < firstPtsUs) {
                     firstPtsUs = presentationTimeUs
                 }
                 val globalUs = shotTimelineStartUs + (presentationTimeUs - firstPtsUs)
                 val active = captions.firstOrNull { globalUs in it.startUs..it.endUs }
-                    ?: return SpannableString("")
-                val str = SpannableString(" ${active.text} ")
-                val all = Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-                val sizePx = when (active.style) {
-                    CaptionStyle.BOLD_BOX -> 66
-                    CaptionStyle.SUBTITLE_BAR -> 58
-                    CaptionStyle.MINIMAL -> 52
+                    ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+                val elapsed = ((globalUs - active.startUs).coerceAtLeast(0L) / 1_000_000.0).toFloat()
+                val animFrac = (elapsed / 0.18f).coerceIn(0f, 1f)
+                val yFrac = CaptionTools.clampSafeAreaY(active.positionYFraction)
+                val baseAnchorY = 1f - yFrac * 2f // +1 top .. -1 bottom
+                val anchorY = when (active.animation) {
+                    CaptionAnimation.SLIDE_UP -> baseAnchorY - (1f - animFrac) * 0.08f
+                    else -> baseAnchorY
+                }.coerceIn(-0.92f, 0.92f)
+                val scale = when (active.animation) {
+                    CaptionAnimation.POP -> 0.85f + 0.15f * animFrac
+                    else -> 1f
                 }
-                str.setSpan(AbsoluteSizeSpan(sizePx), 0, str.length, all)
-                str.setSpan(ForegroundColorSpan(Color.WHITE), 0, str.length, all)
-                str.setSpan(StyleSpan(Typeface.BOLD), 0, str.length, all)
-                if (active.style != CaptionStyle.MINIMAL) {
-                    val alpha = if (active.style == CaptionStyle.BOLD_BOX) 215 else 155
-                    str.setSpan(BackgroundColorSpan(Color.argb(alpha, 0, 0, 0)), 0, str.length, all)
+                val alpha = when (active.animation) {
+                    CaptionAnimation.FADE -> animFrac
+                    else -> 1f
                 }
-                return str
+                return StaticOverlaySettings.Builder()
+                    .setBackgroundFrameAnchor(0f, anchorY)
+                    .setOverlayFrameAnchor(0f, 0f)
+                    .setScale(scale, scale)
+                    .setAlphaScale(alpha)
+                    .build()
             }
-
-            override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings = settings
         }
         return OverlayEffect(ImmutableList.of<TextureOverlay>(overlay))
+    }
+
+    private fun renderCaptionBitmap(caption: CaptionItem, outWidth: Int): Bitmap {
+        val maxTextWidth = (outWidth * 0.86f).toInt().coerceAtLeast(200)
+        val scaleFactor = (outWidth / 1080f).coerceIn(0.6f, 2.2f)
+        val pxSize = (caption.fontSizeSp * 2.6f * scaleFactor).coerceIn(28f, 110f)
+        val tf = when (caption.font) {
+            CaptionFont.SANS_BOLD -> Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            CaptionFont.CONDENSED -> Typeface.create("sans-serif-condensed", Typeface.BOLD)
+            CaptionFont.MONO -> Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = pxSize
+            typeface = tf
+            if (caption.shadowEnabled) setShadowLayer(4f * scaleFactor, 0f, 2f * scaleFactor, Color.argb(200, 0, 0, 0))
+        }
+        val strokePaint = Paint(fillPaint).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (caption.strokeWidth * 1.6f * scaleFactor).coerceAtLeast(1f)
+            color = Color.BLACK
+            clearShadowLayer()
+        }
+
+        // Word-wrap into up to 3 balanced lines
+        val words = caption.text.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val lines = mutableListOf<String>()
+        var cur = StringBuilder()
+        for (w in words) {
+            val cand = if (cur.isEmpty()) w else "$cur $w"
+            if (fillPaint.measureText(cand) <= maxTextWidth - 48) {
+                cur = StringBuilder(cand)
+            } else {
+                if (cur.isNotEmpty()) lines += cur.toString()
+                cur = StringBuilder(w)
+            }
+        }
+        if (cur.isNotEmpty()) lines += cur.toString()
+        if (lines.isEmpty()) return Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+
+        val fm = fillPaint.fontMetrics
+        val lineHeight = (fm.descent - fm.ascent) * 1.18f
+        val textW = lines.maxOf { fillPaint.measureText(it) }.toInt()
+        val padH = (28 * scaleFactor).toInt()
+        val padV = (16 * scaleFactor).toInt()
+        val bmpW = (textW + padH * 2).coerceIn(32, outWidth)
+        val bmpH = (lines.size * lineHeight + padV * 2).toInt().coerceAtLeast(32)
+
+        val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        if (caption.style != CaptionStyle.MINIMAL && caption.bgAlpha > 0.02f) {
+            val alpha = if (caption.style == CaptionStyle.BOLD_BOX) {
+                (caption.bgAlpha * 255).toInt().coerceIn(80, 240)
+            } else {
+                (caption.bgAlpha * 195).toInt().coerceIn(60, 210)
+            }
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(alpha, 12, 12, 12) }
+            val radius = (14f * scaleFactor)
+            canvas.drawRoundRect(RectF(0f, 0f, bmpW.toFloat(), bmpH.toFloat()), radius, radius, bgPaint)
+        }
+
+        val keywords = caption.highlightKeywords.map { it.lowercase() }.toSet()
+        lines.forEachIndexed { idx, line ->
+            val y = padV - fm.ascent + idx * lineHeight
+            val lineW = fillPaint.measureText(line)
+            var x = (bmpW - lineW) / 2f
+            val lineWords = line.split(" ")
+            val spaceW = fillPaint.measureText(" ")
+            lineWords.forEachIndexed { wi, w ->
+                val clean = w.trim(',', '.', '!', '?', ':', ';').lowercase()
+                val isKw = clean in keywords
+                if (isKw) {
+                    val wWidth = fillPaint.measureText(w)
+                    val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+                    val invPaint = Paint(fillPaint).apply {
+                        color = Color.BLACK
+                        clearShadowLayer()
+                    }
+                    canvas.drawRoundRect(
+                        RectF(x - 6f * scaleFactor, y + fm.ascent * 0.9f, x + wWidth + 6f * scaleFactor, y + fm.descent * 0.85f),
+                        8f * scaleFactor,
+                        8f * scaleFactor,
+                        pillPaint,
+                    )
+                    canvas.drawText(w, x, y, invPaint)
+                } else {
+                    if (caption.strokeWidth > 0.2f) canvas.drawText(w, x, y, strokePaint)
+                    canvas.drawText(w, x, y, fillPaint)
+                }
+                x += fillPaint.measureText(w) + if (wi < lineWords.lastIndex) spaceW else 0f
+            }
+        }
+        return bmp
     }
 
     suspend fun saveToGallery(context: Context, file: File): Uri = withContext(Dispatchers.IO) {

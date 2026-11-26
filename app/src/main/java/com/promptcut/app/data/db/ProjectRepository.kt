@@ -1,5 +1,8 @@
 package com.promptcut.app.data.db
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
 import com.promptcut.app.ClipMeta
 import com.promptcut.app.CropBox
 import com.promptcut.app.Span
@@ -13,6 +16,7 @@ import com.promptcut.app.timeline.usToSec
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.UUID
 
 data class LoadedProject(
@@ -21,11 +25,13 @@ data class LoadedProject(
     val assets: List<MediaAssetEntity>,
     val conversationJson: String,
     val clipCuts: Map<Int, List<Span>>,
+    val missingAssetIndices: List<Int> = emptyList(),
 )
 
 /**
- * Offline-first Room repository managing project autosave, lifecycle (create, rename, duplicate,
- * soft delete & restore), import/export JSON, legacy EditPlan migration, and session/render recovery.
+ * Offline-first Room repository managing project autosave, thumbnails, missing-media detection
+ * and relinking, lifecycle (create, rename, duplicate, soft delete & restore), import/export JSON,
+ * legacy EditPlan migration, and session/render recovery.
  */
 class ProjectRepository(private val db: AppDatabase) {
 
@@ -58,6 +64,8 @@ class ProjectRepository(private val db: AppDatabase) {
         clipCuts: Map<Int, List<Span>>,
         conversation: ConversationManager,
         lastOutputPath: String? = null,
+        thumbnailPath: String? = null,
+        lastExportDiagnosticsJson: String? = null,
     ) {
         val now = System.currentTimeMillis()
         val updated = project.copy(updatedAtMs = now)
@@ -77,6 +85,10 @@ class ProjectRepository(private val db: AppDatabase) {
             lastOutputPath = lastOutputPath ?: existing?.lastOutputPath,
             durationSec = usToSec(updated.totalDurationUs),
             clipCount = clips.size,
+            thumbnailPath = thumbnailPath ?: existing?.thumbnailPath,
+            missingAssetsCount = 0,
+            lastBackupAtMs = existing?.lastBackupAtMs,
+            lastExportDiagnosticsJson = lastExportDiagnosticsJson ?: existing?.lastExportDiagnosticsJson,
         )
         db.projectDao().clearAllActiveSessions()
         db.projectDao().upsert(entity)
@@ -114,7 +126,7 @@ class ProjectRepository(private val db: AppDatabase) {
         if (convEntries.isNotEmpty()) db.conversationDao().upsertAll(convEntries)
     }
 
-    suspend fun loadProject(projectId: String): AppResult<LoadedProject> {
+    suspend fun loadProject(projectId: String, context: Context? = null): AppResult<LoadedProject> {
         val entity = db.projectDao().findById(projectId)
             ?: return AppResult.Failure(AppError.Storage("Project not found."))
         val assets = db.mediaAssetDao().forProject(projectId)
@@ -139,15 +151,102 @@ class ProjectRepository(private val db: AppDatabase) {
             )
             is AppResult.Failure -> return parsed
         }
+        val missingIndices = if (context != null) findMissingAssets(context, assets) else emptyList()
+        if (context != null && missingIndices.size != entity.missingAssetsCount) {
+            db.projectDao().upsert(entity.copy(missingAssetsCount = missingIndices.size))
+        }
         db.projectDao().clearAllActiveSessions()
         db.projectDao().setActiveSession(projectId)
         return AppResult.Success(
             LoadedProject(
-                entity = entity,
+                entity = entity.copy(missingAssetsCount = missingIndices.size),
                 timeline = timeline,
                 assets = assets,
                 conversationJson = entity.conversationJson,
                 clipCuts = decodeCuts(entity.clipCutsJson),
+                missingAssetIndices = missingIndices,
+            )
+        )
+    }
+
+    fun findMissingAssets(context: Context, assets: List<MediaAssetEntity>): List<Int> {
+        return assets.filter { a -> !isAssetReadable(context, a.uriString) }.map { it.clipIndex }
+    }
+
+    fun isAssetReadable(context: Context, uriString: String): Boolean {
+        if (uriString.isBlank()) return false
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return false
+        if (uri.scheme == "file") {
+            val path = uri.path ?: return false
+            return File(path).let { it.exists() && it.canRead() && it.length() > 0L }
+        }
+        return runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false
+        }.getOrDefault(false)
+    }
+
+    suspend fun relinkAsset(
+        context: Context,
+        projectId: String,
+        clipIndex: Int,
+        newUriString: String,
+        newDisplayName: String? = null,
+    ): AppResult<LoadedProject> {
+        val entity = db.projectDao().findById(projectId)
+            ?: return AppResult.Failure(AppError.Storage("Project not found."))
+        val assets = db.mediaAssetDao().forProject(projectId)
+        val updatedAssets = assets.map { a ->
+            if (a.clipIndex != clipIndex) a
+            else a.copy(
+                uriString = newUriString,
+                displayName = newDisplayName ?: a.displayName,
+            )
+        }
+        db.mediaAssetDao().upsertAll(updatedAssets)
+
+        val parsed = when (val r = TimelineCodec.fromJson(entity.timelineJson)) {
+            is AppResult.Success -> r.value
+            is AppResult.Failure -> return r
+        }
+        val updatedTimeline = parsed.copy(
+            updatedAtMs = System.currentTimeMillis(),
+            videoTracks = parsed.videoTracks.map { t ->
+                t.copy(items = t.items.map { item ->
+                    if (item.sourceClipIndex == clipIndex) item.copy(sourceUri = newUriString) else item
+                })
+            },
+        )
+        val missing = findMissingAssets(context, updatedAssets)
+        db.projectDao().upsert(
+            entity.copy(
+                timelineJson = TimelineCodec.toJson(updatedTimeline),
+                missingAssetsCount = missing.size,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+        )
+        return loadProject(projectId, context)
+    }
+
+    fun saveProjectThumbnail(context: Context, projectId: String, bitmap: Bitmap): String? {
+        return runCatching {
+            val dir = File(context.filesDir, "thumbnails").apply { mkdirs() }
+            val file = File(dir, "$projectId.jpg")
+            val scaled = Bitmap.createScaledBitmap(bitmap, 240, (240 * bitmap.height / bitmap.width.coerceAtLeast(1)).coerceIn(80, 426), true)
+            file.outputStream().use { os ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 82, os)
+            }
+            if (scaled !== bitmap) scaled.recycle()
+            file.absolutePath
+        }.getOrNull()
+    }
+
+    suspend fun recordExportDiagnostics(projectId: String, outputPath: String, diagnosticsJson: String) {
+        val existing = db.projectDao().findById(projectId) ?: return
+        db.projectDao().upsert(
+            existing.copy(
+                lastOutputPath = outputPath,
+                lastExportDiagnosticsJson = diagnosticsJson,
+                updatedAtMs = System.currentTimeMillis(),
             )
         )
     }
@@ -209,6 +308,9 @@ class ProjectRepository(private val db: AppDatabase) {
     }
 
     suspend fun permanentlyDeleteProject(projectId: String) {
+        db.projectDao().findById(projectId)?.thumbnailPath?.let { path ->
+            runCatching { File(path).delete() }
+        }
         db.projectDao().hardDelete(projectId)
     }
 
@@ -216,8 +318,12 @@ class ProjectRepository(private val db: AppDatabase) {
         val entity = db.projectDao().findById(projectId)
             ?: return AppResult.Failure(AppError.Storage("Project not found."))
         val assets = db.mediaAssetDao().forProject(projectId)
+        val now = System.currentTimeMillis()
+        db.projectDao().upsert(entity.copy(lastBackupAtMs = now))
         val wrapper = JSONObject().apply {
             put("format", "promptcut_project_v2")
+            put("schemaVersion", TimelineProject.CURRENT_SCHEMA_VERSION)
+            put("exportedAtMs", now)
             put("timeline", JSONObject(entity.timelineJson))
             if (!entity.legacyPlanJson.isNullOrBlank()) put("legacyPlanJson", entity.legacyPlanJson)
             if (entity.conversationJson.isNotBlank()) put("conversationJson", entity.conversationJson)
@@ -248,9 +354,9 @@ class ProjectRepository(private val db: AppDatabase) {
         if (trimmed.isBlank()) return AppResult.Failure(AppError.Validation("Import file is empty."))
         return try {
             val root = JSONObject(trimmed)
-            val isV2Envelope = root.optString("format") == "promptcut_project_v2" && root.has("timeline")
-            val timelineSource = if (isV2Envelope) root.getJSONObject("timeline").toString() else trimmed
-            val importedAssets = if (isV2Envelope) parseImportedAssets(root.optJSONArray("assets")) else emptyList()
+            val isEnvelope = (root.optString("format").startsWith("promptcut_project_v")) && root.has("timeline")
+            val timelineSource = if (isEnvelope) root.getJSONObject("timeline").toString() else trimmed
+            val importedAssets = if (isEnvelope) parseImportedAssets(root.optJSONArray("assets")) else emptyList()
             val metas = fallbackClips.ifEmpty {
                 importedAssets.map { a ->
                     ClipMeta(

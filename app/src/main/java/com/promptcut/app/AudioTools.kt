@@ -171,4 +171,36 @@ object AudioTools {
         }
         return merged.filter { it.length >= 0.35 }
     }
+
+    /**
+     * Detects musical beat timestamps in microseconds for timeline beat-markers & beat-sync editing.
+     * Falls back to onset peaks if tempo confidence is ambiguous.
+     */
+    fun detectBeats(context: Context, uri: Uri, hopSec: Double = 0.05, maxSec: Double = 180.0): List<Long> {
+        val env = envelope(context, uri, hopSec, maxSec) ?: return emptyList()
+        if (env.isEmpty()) return emptyList()
+        val tempo = Beat.detect(env, hopSec)
+        val totalSec = env.size * hopSec
+        if (tempo != null) {
+            val out = mutableListOf<Long>()
+            var t = tempo.offsetSec
+            while (t <= totalSec) {
+                if (t >= 0.0) out += (t * 1_000_000.0).toLong()
+                t += tempo.beatSec
+            }
+            if (out.isNotEmpty()) return out
+        }
+        val onsets = Beat.onsets(env)
+        val mean = onsets.average()
+        val markers = mutableListOf<Long>()
+        var lastT = -1.0
+        for (i in onsets.indices) {
+            val t = i * hopSec
+            if (onsets[i] > maxOf(mean * 2.5, 0.25) && t - lastT >= 0.32) {
+                markers += (t * 1_000_000.0).toLong()
+                lastT = t
+            }
+        }
+        return markers
+    }
 }

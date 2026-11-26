@@ -21,6 +21,10 @@ data class ProjectEntity(
     val lastOutputPath: String? = null,
     val durationSec: Double = 0.0,
     val clipCount: Int = 0,
+    val thumbnailPath: String? = null,
+    val missingAssetsCount: Int = 0,
+    val lastBackupAtMs: Long? = null,
+    val lastExportDiagnosticsJson: String? = null,
 )
 
 @Entity(

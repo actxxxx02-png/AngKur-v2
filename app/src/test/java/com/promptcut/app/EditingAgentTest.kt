@@ -173,4 +173,118 @@ class EditingAgentTest {
         val failed = timeoutEvents.filterIsInstance<AgentEvent.Failed>().firstOrNull()
         assertTrue(failed != null && failed.error is AppError.Timeout)
     }
+
+    @Test
+    fun v3AgentTools_parseAndExecuteAcrossMultiTrackTimeline() {
+        val clip0 = VideoClipItem(
+            id = "seg_0",
+            sourceClipIndex = 0,
+            sourceUri = "file:///game.mp4",
+            timelineStartUs = 0L,
+            sourceStartUs = 0L,
+            sourceEndUs = 5_000_000L,
+        )
+        val clip1 = VideoClipItem(
+            id = "seg_1",
+            sourceClipIndex = 0,
+            sourceUri = "file:///game.mp4",
+            timelineStartUs = 5_000_000L,
+            sourceStartUs = 5_000_000L,
+            sourceEndUs = 8_000_000L,
+        )
+        val engine = TimelineEngine(TimelineProject(videoTracks = listOf(VideoTrack(items = listOf(clip0, clip1)))))
+        val executor = AgentExecutor(engine)
+
+        val calls = listOf(
+            AiToolCall("1", "set_effects", """{"item_id":"seg_0","vignette":0.5,"glow":0.35,"film_grain":0.2,"sharpen":0.3}"""),
+            AiToolCall("2", "add_keyframe", """{"item_id":"seg_0","time_offset_sec":1.5,"property":"SCALE","value":1.25}"""),
+            AiToolCall("3", "add_overlay_clip", """{"clip_index":1,"start_sec":0.0,"end_sec":2.0,"timeline_start_sec":1.0,"x":0.6,"y":0.1,"width_fraction":0.32}"""),
+            AiToolCall("4", "add_sfx", """{"sfx_type":"impact","timeline_sec":1.0,"volume":0.8}"""),
+            AiToolCall("5", "sync_to_beats", """{"bpm":120.0}"""),
+            AiToolCall("6", "generate_captions", """{"style":"BOLD_BOX"}"""),
+            AiToolCall("7", "style_captions", """{"font":"CONDENSED","font_size_sp":20,"animation":"POP","auto_punctuate":true}"""),
+            AiToolCall("8", "trim_silence", """{"clip_index":0}"""),
+        )
+        val parsed = calls.map { AgentTools.parseToolCall(it).getOrNull()!! }
+
+        val insightWithSilence = mapOf(
+            0 to ClipInsight(
+                clip = 0,
+                shots = listOf(Shot(0.0, 8.0, listOf("action"), 0, false, interest = 2)),
+                speech = listOf(Span(1.0, 3.0, "huge clutch victory")),
+                silenceSpans = listOf(Span(0.0, 0.8, "")),
+            )
+        )
+        val outcome = executor.execute(parsed, sampleClips, insightWithSilence, mapOf(0 to "file:///game.mp4", 1 to "file:///reaction.mp4")).getOrNull()!!
+        val updated = outcome.updatedProject
+
+        assertEquals(0.5f, updated.mainVideoTrack.items.first().effects.vignette, 0.01f)
+        assertEquals(1, updated.mainVideoTrack.items.first().keyframes.size)
+        assertEquals(1, updated.overlayVideoTrack?.items?.size ?: 0)
+        assertEquals(1, updated.audioTracks.first { it.id == "audio_sfx" }.items.size)
+        assertTrue(updated.beatMarkersUs.isNotEmpty())
+        assertTrue(updated.mainVideoTrack.items.first().sourceStartUs > 0L)
+    }
+
+    @Test
+    fun validator_rejectsLockedTracksAndPromptsOnMajorDestructiveChanges() {
+        val seg1 = VideoClipItem(id = "s1", sourceClipIndex = 0, timelineStartUs = 0L, sourceStartUs = 0L, sourceEndUs = 3_000_000L)
+        val seg2 = VideoClipItem(id = "s2", sourceClipIndex = 0, timelineStartUs = 3_000_000L, sourceStartUs = 3_000_000L, sourceEndUs = 6_000_000L)
+
+        // Locked main video track blocks AI tools
+        val lockedVideoProj = TimelineProject(videoTracks = listOf(VideoTrack(locked = true, items = listOf(seg1, seg2))))
+        assertTrue(AgentValidator.validate(listOf(AgentToolInvocation.SetSpeed("s1", 1.5)), lockedVideoProj, sampleClips, true).isFailure)
+
+        // Locked overlay track blocks add_overlay_clip
+        val lockedOverlayProj = TimelineProject(
+            videoTracks = listOf(
+                VideoTrack(items = listOf(seg1, seg2)),
+                VideoTrack(id = "video_overlay", name = "Video 2", isMain = false, locked = true),
+            )
+        )
+        assertTrue(
+            AgentValidator.validate(
+                listOf(AgentToolInvocation.AddOverlayClip(1, 0.0, 2.0, 0.5, com.promptcut.app.timeline.OverlayBounds())),
+                lockedOverlayProj,
+                sampleClips,
+                true,
+            ).isFailure
+        )
+
+        // Locked SFX track blocks add_sfx
+        val lockedSfxProj = TimelineProject(
+            videoTracks = listOf(VideoTrack(items = listOf(seg1, seg2))),
+            audioTracks = listOf(com.promptcut.app.timeline.AudioTrack(id = "audio_sfx", name = "A3 · SFX", type = com.promptcut.app.timeline.AudioTrackType.SFX, locked = true)),
+        )
+        assertTrue(AgentValidator.validate(listOf(AgentToolInvocation.AddSfx("whoosh", 1.0)), lockedSfxProj, sampleClips, true).isFailure)
+
+        // Locked caption track blocks generate_captions & style_captions
+        val lockedCapProj = TimelineProject(
+            videoTracks = listOf(VideoTrack(items = listOf(seg1, seg2))),
+            captionTracks = listOf(com.promptcut.app.timeline.CaptionTrack(locked = true)),
+        )
+        assertTrue(AgentValidator.validate(listOf(AgentToolInvocation.GenerateCaptions()), lockedCapProj, sampleClips, true).isFailure)
+        assertTrue(AgentValidator.validate(listOf(AgentToolInvocation.StyleCaptions()), lockedCapProj, sampleClips, true).isFailure)
+
+        // Major destructive change (replacesWholeTimeline OR deleting >50% of >=2 clips) prompts even when editedByUser=false
+        val unlockedProj = TimelineProject(videoTracks = listOf(VideoTrack(items = listOf(seg1, seg2))))
+        val replacePrompt = AgentValidator.validate(emptyList(), unlockedProj, sampleClips, allowOverwriteManualEdits = false, replacesWholeTimeline = true).getOrNull()!!
+        assertTrue(replacePrompt.requiresManualEditApproval)
+
+        val deleteMostPrompt = AgentValidator.validate(
+            listOf(AgentToolInvocation.DeleteSegment("s1"), AgentToolInvocation.DeleteSegment("s2")),
+            unlockedProj,
+            sampleClips,
+            allowOverwriteManualEdits = false,
+        ).getOrNull()!!
+        assertTrue(deleteMostPrompt.requiresManualEditApproval)
+
+        val approved = AgentValidator.validate(
+            listOf(AgentToolInvocation.DeleteSegment("s1"), AgentToolInvocation.DeleteSegment("s2")),
+            unlockedProj,
+            sampleClips,
+            allowOverwriteManualEdits = true,
+        ).getOrNull()!!
+        assertFalse(approved.requiresManualEditApproval)
+    }
 }

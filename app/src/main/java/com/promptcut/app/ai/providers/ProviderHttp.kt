@@ -54,7 +54,8 @@ internal object ProviderHttp {
             } catch (e: ApiException) {
                 throw e
             } catch (e: IOException) {
-                throw ApiException("Network problem reaching $providerName: ${e.message ?: "no connection"}.")
+                val safeMsg = KeyVault.redactSecrets(e.message ?: "no connection")
+                throw ApiException("Network problem reaching $providerName: $safeMsg.")
             } finally {
                 conn.disconnect()
             }
@@ -118,7 +119,8 @@ internal object ProviderHttp {
             } catch (e: ApiException) {
                 throw e
             } catch (e: IOException) {
-                throw ApiException("Streaming interrupted for $providerName: ${e.message ?: "network error"}.")
+                val safeMsg = KeyVault.redactSecrets(e.message ?: "network error")
+                throw ApiException("Streaming interrupted for $providerName: $safeMsg.")
             } finally {
                 conn.disconnect()
             }
@@ -126,18 +128,32 @@ internal object ProviderHttp {
     }
 
     fun friendlyHttpError(providerName: String, code: Int, body: String): String {
-        val detail = runCatching {
-            val o = JSONObject(body)
-            o.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
-                ?: o.optString("message")
-        }.getOrNull().orEmpty().take(200)
+        val detail = KeyVault.redactSecrets(
+            runCatching {
+                val o = JSONObject(body)
+                o.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+                    ?: o.optString("message")
+            }.getOrNull().orEmpty().take(200)
+        )
+        val lower = detail.lowercase()
+        val isQuota = "quota" in lower || "billing" in lower || "credit" in lower || "daily limit" in lower
         return when (code) {
-            400 -> if ("API key" in detail || "API_KEY" in detail || "invalid x-api-key" in detail.lowercase()) {
-                "Your $providerName API key isn't valid. Open Settings and paste it again."
+            400 -> if ("api key" in lower || "api_key" in lower || "invalid x-api-key" in lower) {
+                "Your $providerName API key isn't valid. Open Settings to check or rotate keys."
             } else "$providerName rejected the request: $detail"
-            401, 403 -> "Your $providerName API key isn't valid or lacks access. Open Settings and check it."
+            401 -> "Your $providerName API key isn't valid or lacks access. Open Settings and check it."
+            403 -> if (isQuota) {
+                "Quota or billing credit exhausted on $providerName."
+            } else {
+                "Your $providerName API key isn't valid or lacks access. Open Settings and check it."
+            }
+            402 -> "Quota or billing credit exhausted on $providerName."
             404 -> "The selected $providerName model isn't available. Test the connection in Settings to pick a current model."
-            429 -> "Rate limit reached on $providerName. Wait a moment or switch provider in Settings."
+            429 -> if (isQuota) {
+                "Quota exhausted on $providerName key. Add or select another key in Settings."
+            } else {
+                "Rate limit reached on $providerName. Waiting for cooldown or rotating to another eligible key."
+            }
             in 500..599 -> "$providerName servers are busy ($code). Try again in a moment."
             else -> "$providerName error $code: $detail"
         }

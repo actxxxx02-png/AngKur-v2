@@ -11,33 +11,30 @@ On-device analysis, multi-track timeline editing, autonomous AI editing agent, a
   <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-111111?logo=android&logoColor=white">
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-222222?logo=kotlin&logoColor=white">
   <img alt="Media3" src="https://img.shields.io/badge/Media3-Transformer%201.11-333333">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-000000">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.0.0-000000">
 </p>
 
-## What PromptCut v1.0 Does
+## What PromptCut V3 Does
 
-PromptCut upgrades natural-language video editing into a full multi-track studio:
+PromptCut upgrades natural-language video editing into a full multi-track monochrome studio:
 
-1. **Strictly Monochrome Studio UI (Dark & Light + System)**
-   - Live **Preview Stage** with synchronized caption overlays, aspect-ratio frame guide (`9:16`, `16:9`, `1:1`), and ExoPlayer playback controls.
-   - Interactive **Multi-Track Timeline** (`V1` video clip strips, `A1` audio waveform track, `T1` timed captions track) with pinch/button zoom, time ruler, playhead scrub, split, trim, duplicate, delete, reorder, and **60-step Undo/Redo**.
-   - Expandable **Studio Dock** for **AI Agent**, **Style**, **Edit / Keyframes**, **Captions**, **Audio / Music**, **Effects**, and **Export / QA**.
-2. **Three AI Providers & Free-First Routing**
-   - **Google Gemini** (free tier, vision + sampled frames)
-   - **Groq** (free tier, fast LLM + Whisper speech-to-text)
-   - **Anthropic Claude** (optional paid API using your own key; requires explicit paid-API consent and manual selection — never auto-selected or silently switched to).
-   - **Conversation Memory & Token Budgeting**: Remembers previous turns, project instructions, editing decisions, selected clips/segments, and recent tool operations.
+1. **Strictly Monochrome Dark Studio UI (`Dark` default, `Light`, & `System`)**
+   - Live **Preview Stage** (`1080p` default or optional `720p` proxy mode) with GL-matched effect previews, V2 picture-in-picture overlays, styled captions with safe-area guides, A/B compare, speed selector (`0.5x`–`2x`), and `-1f`/`+1f` frame steppers.
+   - Zoomable **Multi-Track Timeline** (`V1` main video, `V2` overlay/PIP, `A1` music, `A2` voiceover, `A3` sound FX, `T1` captions) with pinch-to-zoom, beat marker diamonds, draggable trim handles, sticky track lock/mute/visibility headers, and **60-step Undo/Redo** with browsable history.
+   - Expandable **Bottom Studio Dock** for **AI Agent**, **Style**, **Edit / Speed Ramp / Keyframes**, **Captions**, **Audio / SFX**, **Effects / PIP**, and **Export / QA**.
+2. **Unified AI Brain & Multi-API Key Manager**
+   - **Google Gemini** (free tier, vision + sampled frames), **Groq** (free tier, fast LLM + Whisper speech-to-text), and **Anthropic Claude** (strictly manual-only with explicit paid-API consent — never auto-selected).
+   - **Unlimited Keys per Provider**: Add, rename, mask, enable/disable, prioritize preferred keys, test individually or batch-test, and view per-key health/cooldown status with smart same-provider key rotation.
+   - **Conversation Memory & Token Budgeting**: Remembers previous turns, project instructions, editing decisions, selected clips/segments, and rolling context compaction.
 3. **Autonomous AI Editing Agent**
-   - Strictly typed, schema-validated editing tools (`inspect_clips`, `detect_highlights`, `trim_segment`, `split_segment`, `delete_segment`, `duplicate_segment`, `reorder_segments`, `set_crop_resize`, `generate_captions`, `edit_caption`, `set_transition`, `set_look`, `set_speed`, `configure_audio_music`, `inspect_timeline_qa`).
-   - **Manual-Edit Protection**: Items modified by hand (`editedByUser`) trigger an approval prompt before the AI agent can overwrite them.
-   - Every agent edit runs as a single atomic, undoable timeline transaction.
-4. **On-Device Intelligence**
-   - ML Kit image labeling, face/smile detection, and **Latin OCR** (`GamingSignals` detects kill feeds, headshots, victory/defeat screens, and score increases; `StoryAnalyzer` builds 5-act arcs, detects silence spans, and maps speech transcripts into synchronized timeline captions).
-5. **Security & Privacy**
-   - API keys are encrypted on-device with **Android Keystore AES-256-GCM** (`KeyVault`) with automatic migration of legacy entries and **zero plaintext fallback**.
-   - Full source videos are **never uploaded**; only compact text descriptions, optional sampled low-res still frames, or user-approved Groq STT audio are sent.
-6. **Offline-First Project Persistence & Crash Recovery**
-   - Room SQLite database (`projects`, `media_assets`, `conversations`, `render_jobs`) with automatic session autosave, project create/rename/duplicate/soft-delete/restore, JSON v2 import/export, non-destructive migration of legacy `EditPlan` v1 files, and interrupted render/session recovery.
+   - Strictly typed, schema-validated editing tools across all V1/V2/A1/A3/T1 tracks (`inspect_clips`, `detect_highlights`, `trim_segment`, `split_segment`, `delete_segment`, `duplicate_segment`, `reorder_segments`, `set_crop_resize`, `generate_captions`, `edit_caption`, `style_captions`, `set_transition`, `set_look`, `set_speed`, `set_effects`, `add_keyframe`, `add_overlay_clip`, `add_sfx`, `trim_silence`, `sync_to_beats`, `configure_audio_music`, `inspect_timeline_qa`).
+   - **Track Lock & Edit Protection**: Respects locked tracks, prompts before overwriting manual edits (`editedByUser`) or performing major destructive timeline replacements, and executes every agent edit atomically.
+4. **Video Effects, Audio Studio & Hardware-Adaptive Export**
+   - Per-clip OpenGL ES 2.0 shaders (`ShaderAdjustEffect`, `ShakeMatrixEffect`, `KeyframeTransformEffect`, `KeyframeOpacityEffect`), multi-point **Speed Ramps** (`SpeedRampProvider`), deterministic PCM **SFX Synthesizer** (`Whoosh`, `Impact`, `Pop`, `Riser`, `Chime`), beat detection, voice enhancement, and `-14 dBFS` loudness normalization.
+   - Hardware capability probing (`DeviceCapabilities`) for **720p / 1080p / 1440p QHD / 4K UHD**, `24–60 fps`, optional **H.265 (HEVC)**, audio bitrate selection, MP4 container verification, and `ExportDiagnostics`.
+5. **Security, Privacy & Room Persistence (v2)**
+   - API keys are encrypted on-device with **Android Keystore AES-256-GCM** (`KeyVault`) with zero plaintext fallback and masked logs/diagnostics.
+   - Room SQLite database (`v2` non-destructive migration) with project thumbnails, missing-media detection + relinking, soft delete/restore, JSON import/export, and crash/render recovery.
 
 ## Quick Build & Run
 

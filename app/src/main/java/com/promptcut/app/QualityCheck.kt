@@ -2,13 +2,15 @@ package com.promptcut.app
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import com.promptcut.app.intelligence.CaptionTools
+import com.promptcut.app.timeline.CaptionStyle
 import com.promptcut.app.timeline.TimelineProject
-import com.promptcut.app.timeline.usToSec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -27,9 +29,12 @@ enum class QaIssue {
     DULL_SHOTS,
     ABRUPT_ENDING,
     CAPTION_OVERLAP,
+    CAPTION_READABILITY,
     REPEATED_SCENES,
     AUDIO_CLIPPING,
     AUDIO_SYNC,
+    FROZEN_FRAMES,
+    EXPORT_CORRUPTION,
 }
 
 data class SuggestedRepair(
@@ -71,8 +76,9 @@ data class QaReport(
 }
 
 /**
- * Inspects rendered output & timeline structure for rotation, duration, FPS, audio sync/clipping,
- * color fidelity, black frames, caption overlaps, repeated scenes, weak openings, and abrupt endings.
+ * Inspects rendered output & timeline structure for container integrity, rotation, duration, FPS,
+ * frozen frames, audio sync/clipping, color fidelity, black frames, caption overlap & readability,
+ * repeated scenes, weak openings, and abrupt endings.
  */
 object QualityCheck {
 
@@ -134,6 +140,16 @@ object QualityCheck {
         var rotationFix = 0
         var outDurationSec = 0.0
 
+        val verified = Renderer.verifyExportedMp4(video, expectAudio = expectMusic || expectSound)
+        if (!verified.valid) {
+            issues[QaIssue.EXPORT_CORRUPTION] = verified.errorReason ?: "MP4 container verification failed"
+            items += QaItem("MP4 container integrity", false, verified.errorReason ?: "corrupt output")
+            repairs += SuggestedRepair("safe_rerender", QaIssue.EXPORT_CORRUPTION, "Re-render in Safe Mode", "Export shot-by-shot to avoid encoder instability.")
+            return@withContext QaReport(items, issues, suggestedRepairs = repairs)
+        } else {
+            items += QaItem("MP4 verified (${verified.width}x${verified.height})", true)
+        }
+
         // ---- format: orientation, length, frame rate
         MediaMetadataRetriever().use { r ->
             r.setDataSource(video.absolutePath)
@@ -141,8 +157,8 @@ object QualityCheck {
             val h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
             val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
             val (dw, dh) = if (rot == 90 || rot == 270) h to w else w to h
-            val wantPortrait = plan.aspect.height > plan.aspect.width
-            val wantLandscape = plan.aspect.width > plan.aspect.height
+            val wantPortrait = if (project != null) project.resolvedAspectRatio() < 0.95f else plan.aspect.height > plan.aspect.width
+            val wantLandscape = if (project != null) project.resolvedAspectRatio() > 1.05f else plan.aspect.width > plan.aspect.height
             val upright = when {
                 wantPortrait -> dh > dw
                 wantLandscape -> dw > dh
@@ -218,12 +234,13 @@ object QualityCheck {
             }
         }
 
-        // ---- picture: compare each shot with its source
+        // ---- picture & frozen-frame check
         val colourSegs = mutableListOf<Int>()
         val problems = mutableListOf<String>()
         var black = false
+        var frozenPairs = 0
         val byIndex = clips.associateBy { it.meta.index }
-        val targetAspect = plan.aspect.width.toDouble() / plan.aspect.height
+        val targetAspect = if (project != null) project.resolvedAspectRatio().toDouble() else plan.aspect.width.toDouble() / plan.aspect.height
         MediaMetadataRetriever().use { outR ->
             outR.setDataSource(video.absolutePath)
             var t = 0.0
@@ -234,6 +251,15 @@ object QualityCheck {
                 if (i % sampleEvery != 0) return@forEachIndexed
                 val clip = byIndex[seg.clip] ?: return@forEachIndexed
                 val outBmp = frame(outR, mid) ?: return@forEachIndexed
+                if (seg.outputSec >= 1.2) {
+                    val outBmp2 = frame(outR, mid + 0.5)
+                    if (outBmp2 != null) {
+                        val diff = frameMeanAbsDiff(outBmp, outBmp2)
+                        val expectedMotion = (insights[seg.clip]?.avgMotion ?: 2.0) > 2.5
+                        if (diff < 0.25 && expectedMotion) frozenPairs++
+                        outBmp2.recycle()
+                    }
+                }
                 val srcBmp = MediaMetadataRetriever().use { sr ->
                     runCatching { sr.setDataSource(context, clip.uri); frame(sr, seg.start + seg.outputSec / 2 * seg.speed) }.getOrNull()
                 } ?: run { outBmp.recycle(); return@forEachIndexed }
@@ -255,6 +281,13 @@ object QualityCheck {
                 }
             }
         }
+        if (frozenPairs >= 2) {
+            issues[QaIssue.FROZEN_FRAMES] = "detected stalled frames across $frozenPairs shot(s)"
+            items += QaItem("Motion continuity", false, "$frozenPairs stalled segment(s)")
+            repairs += SuggestedRepair("safe_rerender", QaIssue.FROZEN_FRAMES, "Re-render Safe Mode", "Re-encode shots individually to prevent frame stalls.")
+        } else if (plan.segments.isNotEmpty()) {
+            items += QaItem("Motion continuity", true)
+        }
         if (colourSegs.isNotEmpty()) {
             issues[QaIssue.COLOUR] = problems.distinct().joinToString()
             items += QaItem("Natural colours", false, problems.distinct().joinToString() + " in ${colourSegs.size} shot(s)")
@@ -265,7 +298,7 @@ object QualityCheck {
             items += QaItem("No black shots", false)
         }
 
-        // ---- story & structure: dull shots, abrupt ending, repeated adjacent scenes, caption overlap
+        // ---- story & structure
         val dull = plan.segments.mapIndexedNotNull { i, seg ->
             val mid = seg.start + (seg.end - seg.start) / 2
             val shot = insights[seg.clip]?.shots?.firstOrNull { mid >= it.start && mid <= it.end }
@@ -300,14 +333,24 @@ object QualityCheck {
             items += QaItem("Strong ending", true)
         }
 
-        if (project != null) {
+        // ---- caption timing & readability
+        if (project != null && project.mainCaptionTrack.items.isNotEmpty()) {
             val overlaps = detectCaptionOverlaps(project)
             if (overlaps > 0) {
                 issues[QaIssue.CAPTION_OVERLAP] = "$overlaps overlapping caption(s)"
                 items += QaItem("Caption timing", false, "$overlaps overlap(s)")
                 repairs += SuggestedRepair("fix_captions", QaIssue.CAPTION_OVERLAP, "Fix caption timing", "Automatically stagger overlapping subtitles.")
-            } else if (project.mainCaptionTrack.items.isNotEmpty()) {
+            } else {
                 items += QaItem("Caption timing", true)
+            }
+
+            val readabilityIssues = detectCaptionReadabilityIssues(project)
+            if (readabilityIssues > 0) {
+                issues[QaIssue.CAPTION_READABILITY] = "$readabilityIssues caption(s) too small, clipped outside safe zone, or missing contrast"
+                items += QaItem("Caption readability", false, "$readabilityIssues caption(s) need contrast/safe-zone fix")
+                repairs += SuggestedRepair("fix_caption_readability", QaIssue.CAPTION_READABILITY, "Fix caption readability", "Clamp captions into safe area, boost size >=16sp, and add stroke/backing.")
+            } else {
+                items += QaItem("Caption readability", true)
             }
         }
 
@@ -336,11 +379,50 @@ object QualityCheck {
         return overlaps
     }
 
+    fun detectCaptionReadabilityIssues(project: TimelineProject): Int {
+        return project.mainCaptionTrack.items.count { c ->
+            val outOfSafeArea = c.positionYFraction < 0.12f || c.positionYFraction > 0.88f
+            val tooSmall = c.fontSizeSp < 14
+            val lowContrastMinimal = c.style == CaptionStyle.MINIMAL && c.strokeWidth < 1.0f && !c.shadowEnabled
+            val tooLong = c.text.length > 84
+            outOfSafeArea || tooSmall || lowContrastMinimal || tooLong
+        }
+    }
+
+    fun repairCaptionReadability(project: TimelineProject): List<com.promptcut.app.timeline.CaptionItem> {
+        return project.mainCaptionTrack.items.map { c ->
+            val fixed = c.copy(
+                positionYFraction = CaptionTools.clampSafeAreaY(c.positionYFraction),
+                fontSizeSp = c.fontSizeSp.coerceAtLeast(16),
+                strokeWidth = if (c.style == CaptionStyle.MINIMAL) c.strokeWidth.coerceAtLeast(2.0f) else c.strokeWidth,
+                shadowEnabled = true,
+                bgAlpha = if (c.style != CaptionStyle.MINIMAL) c.bgAlpha.coerceAtLeast(0.55f) else c.bgAlpha,
+            )
+            CaptionTools.enrichCaption(fixed, applyPunctuation = false, highlightKeywords = fixed.highlightKeywords.isNotEmpty())
+        }
+    }
+
+    private fun frameMeanAbsDiff(a: Bitmap, b: Bitmap): Double {
+        val sa = Bitmap.createScaledBitmap(a, 48, 48, true)
+        val sb = Bitmap.createScaledBitmap(b, 48, 48, true)
+        val pa = IntArray(48 * 48)
+        val pb = IntArray(48 * 48)
+        sa.getPixels(pa, 0, 48, 0, 0, 48, 48)
+        sb.getPixels(pb, 0, 48, 0, 0, 48, 48)
+        sa.recycle(); sb.recycle()
+        var sum = 0.0
+        for (i in pa.indices) {
+            val ya = 0.299 * Color.red(pa[i]) + 0.587 * Color.green(pa[i]) + 0.114 * Color.blue(pa[i])
+            val yb = 0.299 * Color.red(pb[i]) + 0.587 * Color.green(pb[i]) + 0.114 * Color.blue(pb[i])
+            sum += abs(ya - yb)
+        }
+        return sum / pa.size
+    }
+
     private fun frame(r: MediaMetadataRetriever, tSec: Double): Bitmap? = runCatching {
         r.getScaledFrameAtTime((tSec * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 192, 192)
     }.getOrNull()
 
-    /** Centre-crop to the output's aspect (so source and output show the same area), then measure colour. */
     private fun statsOf(b: Bitmap, aspect: Double): ColorStats {
         var cw = b.width; var ch = b.height
         if (cw.toDouble() / ch > aspect) cw = (ch * aspect).toInt() else ch = (cw / aspect).toInt()
@@ -353,7 +435,6 @@ object QualityCheck {
         return s
     }
 
-    /** Fixes a sideways video without re-encoding: copy all tracks and set the rotation flag. */
     fun fixRotation(video: File, degrees: Int, out: File) {
         val ex = MediaExtractor()
         val muxer = MediaMuxer(out.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)

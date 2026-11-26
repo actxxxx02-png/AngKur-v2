@@ -85,8 +85,12 @@ import com.promptcut.app.ui.components.StylePanel
 import com.promptcut.app.ui.components.TimelineEditor
 import com.promptcut.app.ui.theme.PromptCutTheme
 
-/** Public URL of the privacy policy (required by Google Play). */
-const val PRIVACY_POLICY_URL = "https://example.com/promptcut/privacy"
+/**
+ * Privacy policy URL pointing to the repository's privacy-policy.html.
+ * Publication note: enable GitHub Pages (or host docs/privacy-policy.html on a custom HTTPS page)
+ * before Google Play Store submission.
+ */
+const val PRIVACY_POLICY_URL = "https://github.com/danieldevloper00-tech/promptCut/blob/main/docs/privacy-policy.html"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -228,8 +232,17 @@ fun EditorScreen(vm: EditorViewModel) {
                 playheadUs = vm.playheadUs,
                 isPlaying = vm.isPlaying,
                 preview720p = vm.settings.preview720pMode,
+                fullEffectsPreview = vm.settings.fullEffectsPreview,
+                previewSpeed = vm.previewSpeed,
+                showSafeGuides = vm.showSafeGuides,
+                compareOriginal = vm.compareOriginal,
+                audioMonitorMuted = vm.audioMonitorMuted,
                 onPlayheadChange = { vm.playheadUs = it },
                 onTogglePlay = { vm.isPlaying = !vm.isPlaying },
+                onPreviewSpeedChange = { vm.previewSpeed = it },
+                onToggleSafeGuides = { vm.showSafeGuides = !vm.showSafeGuides },
+                onToggleCompareOriginal = { vm.compareOriginal = !vm.compareOriginal },
+                onToggleAudioMute = { vm.audioMonitorMuted = !vm.audioMonitorMuted },
                 onAddMedia = pickVideos,
             )
 
@@ -264,6 +277,9 @@ fun EditorScreen(vm: EditorViewModel) {
                 onDelete = { vm.deleteSelectedSegment() },
                 onMoveLeft = { vm.moveSelectedSegment(-1) },
                 onMoveRight = { vm.moveSelectedSegment(1) },
+                onTrimItem = { itemId, startUs, endUs -> vm.trimVideoItemEdges(itemId, startUs, endUs) },
+                onToggleTrackLock = { vm.toggleTrackLock(it) },
+                onToggleTrackVisibility = { vm.toggleTrackVisibility(it) },
             )
 
             // CapCut-style Dock Tabs + Collapse Toggle

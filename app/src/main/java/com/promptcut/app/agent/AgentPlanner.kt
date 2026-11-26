@@ -179,13 +179,21 @@ class AgentPlanner(
     }
 
     private fun describeTimeline(project: TimelineProject): String = buildString {
-        appendLine("Aspect=${project.aspect.key}, Look=${project.colorLook.key}, Mood=${project.mood.key}, Total=${round1(usToSec(project.totalDurationUs))}s")
+        appendLine("Aspect=${project.aspect.key}, Look=${project.colorLook.key}, Mood=${project.mood.key}, Total=${round1(usToSec(project.totalDurationUs))}s, Beats=${project.beatMarkersUs.size}")
+        appendLine("V1 (${project.mainVideoTrack.name}, locked=${project.mainVideoTrack.locked}):")
         project.mainVideoTrack.items.forEachIndexed { idx, item ->
-            appendLine("[$idx] id=${item.id} clip=${item.sourceClipIndex} src=${round1(usToSec(item.sourceStartUs))}..${round1(usToSec(item.sourceEndUs))}s tl=${round1(usToSec(item.timelineStartUs))}..${round1(usToSec(item.timelineEndUs))}s speed=${item.speed}x muted=${item.muted} vol=${item.volume} transition=${item.transitionIn.key} manual=${item.editedByUser} why=\"${item.why}\"")
+            appendLine("[$idx] id=${item.id} clip=${item.sourceClipIndex} src=${round1(usToSec(item.sourceStartUs))}..${round1(usToSec(item.sourceEndUs))}s tl=${round1(usToSec(item.timelineStartUs))}..${round1(usToSec(item.timelineEndUs))}s speed=${item.effectiveSpeed}x muted=${item.muted} vol=${item.volume} transition=${item.transitionIn.key} fx=${item.effects.hasActiveAdjustments} kf=${item.keyframes.size} manual=${item.editedByUser} why=\"${item.why}\"")
+        }
+        val v2 = project.overlayVideoTrack
+        if (v2 != null && v2.items.isNotEmpty()) {
+            appendLine("V2 Overlays (locked=${v2.locked}): " + v2.items.joinToString { "id=${it.id} clip=${it.sourceClipIndex} @${round1(usToSec(it.timelineStartUs))}s" })
+        }
+        project.audioTracks.filter { it.items.isNotEmpty() || it.locked }.forEach { at ->
+            appendLine("${at.name} (${at.type.label}, locked=${at.locked}, muted=${at.muted}, vol=${at.volume}): ${at.items.size} item(s)")
         }
         val caps = project.mainCaptionTrack.items
-        if (caps.isNotEmpty()) {
-            appendLine("Captions (${caps.size}): " + caps.take(6).joinToString { "\"${it.text}\" (${round1(usToSec(it.startUs))}s)" })
+        if (caps.isNotEmpty() || project.mainCaptionTrack.locked) {
+            appendLine("Captions (${caps.size}, locked=${project.mainCaptionTrack.locked}): " + caps.take(6).joinToString { "\"${it.text}\" (${round1(usToSec(it.startUs))}s)" })
         }
     }
 
@@ -203,7 +211,7 @@ class AgentPlanner(
 
     companion object {
         private const val AGENT_TOOLS_SYSTEM_PROMPT = """
-You are PromptCut's autonomous video editing agent inside a multi-track mobile timeline editor.
+You are PromptCut's autonomous video editing agent inside a multi-track mobile studio (V1 Main, V2 Overlay/PIP, A1 Music, A2 Voiceover, A3 SFX, Captions).
 You operate ONLY via the declared editing tools or by returning a JSON object:
 {
   "summary": "short explanation of edits made",
@@ -213,8 +221,10 @@ You operate ONLY via the declared editing tools or by returning a JSON object:
 }
 Rules:
 - Never invent segment IDs or clip indices; use exact item_id values from CURRENT TIMELINE.
-- Respect manual user edits: only modify segments requested by the user.
-- For captions/subtitles requests, use generate_captions or edit_caption.
+- Respect locked tracks and manual user edits: only modify segments requested by the user.
+- For visual adjustments/grain/vignette/blur/glow/shake use set_effects; for zoom/pan/opacity animations use add_keyframe; for PIP/B-roll use add_overlay_clip.
+- For sound effects (whoosh, impact, pop, riser, chime) use add_sfx; for removing dead pauses use trim_silence; for rhythm cuts use sync_to_beats.
+- For captions requests use generate_captions, edit_caption, or style_captions.
 - Keep responses concise and deterministic.
 """
     }

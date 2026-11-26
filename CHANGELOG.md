@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.0.0 — PromptCut V3 Studio Upgrade
+### Multi-Track Studio, Preview & Timeline
+- **Dark Studio** monochrome theme default (`Dark`, `Light`, `System`) with stacked Preview Stage, Multi-Track Timeline (`V1`, `V2` Overlay/PIP, `A1` Music, `A2` Voiceover, `A3` SFX, `T1` Captions), and expandable Bottom Studio Dock.
+- Added `1080p` studio preview default (plus optional `720p` proxy mode), A/B compare, safe-area overlay guides, variable playback speed (`0.5x`–`2x`), `-1f`/`+1f` frame steppers, and live preview of V2 overlays, styled captions, and color adjustments.
+- Added pinch-to-zoom timeline scaling, beat marker diamonds on the time ruler, draggable V1 trim handles, sticky track headers with lock and mute/visibility toggles, and browsable Undo/Redo history.
+
+### OpenGL Shaders, Speed Ramps, Captions & Audio Studio
+- Added `ShaderAdjustEffect` (OpenGL ES 2.0 sharpen, glow, vignette, film grain), `ShakeMatrixEffect`, `KeyframeTransformEffect`, `KeyframeOpacityEffect`, and piecewise `SpeedRampProvider`.
+- Added `CaptionTools` (auto-punctuation, keyword emphasis, word-level timing interpolation, safe-Y clamping, `.SRT`/`.VTT` export, font/animation/stroke/background controls).
+- Added deterministic `SfxSynth` (`Whoosh`, `Impact`, `Pop`, `Riser`, `Chime`), `AudioTools.detectBeats`, `AudioStudioProcessor` / `VoiceAndLoudnessDsp` (voice presence + `-14 dBFS` loudness normalization), and multi-track `MusicMux.mixTimelineAudio`.
+
+### AI Agent V3, Multi-Key Manager & Export Diagnostics
+- Expanded `AgentTools` & `AgentExecutor` (`set_effects`, `add_keyframe`, `add_overlay_clip`, `add_sfx`, `trim_silence`, `sync_to_beats`, `style_captions`, `4:5` and `custom` aspects) with locked-track enforcement and manual/destructive edit confirmations in `AgentValidator`.
+- Added unlimited per-provider AES-GCM encrypted API keys (`ApiKeyManager`) with health dashboard, individual/batch testing, and cooldown-aware same-provider rotation (with Claude remaining strictly manual + paid-consent gated).
+- Added `DeviceCapabilities` hardware probing (`1440p QHD`, `4K UHD`, `60fps`, `H.265/HEVC`), preflight storage/RAM checks, `verifyExportedMp4`, `ExportDiagnostics`, and Room v2 non-destructive migration (`MIGRATION_1_2`) with project thumbnails and missing-media relinking.
+
 ## 1.0.0 — Monochrome AI Studio Upgrade
 ### UI & Studio Timeline
 - Complete **strictly monochrome** CapCut-style mobile-first UI (`Dark (Studio)`, `Light`, and `System` themes) powered by `Inter` and `JetBrains Mono`.

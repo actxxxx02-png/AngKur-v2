@@ -1,6 +1,7 @@
 package com.promptcut.app
 
 import android.util.Base64
+import com.promptcut.app.security.KeyVault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -260,21 +261,26 @@ private suspend fun http(method: String, url: String, headers: Map<String, Strin
         try {
             if (body != null) conn.outputStream.use { it.write(body.toByteArray()) }
             val code = conn.responseCode
-            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
-            if (code !in 200..299) throw ApiException(friendlyError(code, text), code, text)
-            text
+            val rawText = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
+            if (code !in 200..299) {
+                val safeText = KeyVault.redactSecrets(rawText)
+                throw ApiException(friendlyError(code, safeText), code, safeText)
+            }
+            rawText
         } catch (e: IOException) {
-            throw ApiException("Network problem: ${e.message ?: "no connection"}. Check your internet and try again.")
+            throw ApiException("Network problem: ${KeyVault.redactSecrets(e.message ?: "no connection")}. Check your internet and try again.")
         } finally {
             conn.disconnect()
         }
     }
 
 private fun friendlyError(code: Int, body: String): String {
-    val detail = runCatching {
-        val o = JSONObject(body)
-        o.optJSONObject("error")?.optString("message") ?: o.optString("message")
-    }.getOrNull().orEmpty().take(200)
+    val detail = KeyVault.redactSecrets(
+        runCatching {
+            val o = JSONObject(body)
+            o.optJSONObject("error")?.optString("message") ?: o.optString("message")
+        }.getOrNull().orEmpty().take(200)
+    )
     return when (code) {
         400 -> if ("API key" in detail || "API_KEY" in detail) "This API key isn't valid. Open Settings and paste it again." else "The AI service rejected the request: $detail"
         401, 403 -> "This API key isn't valid or has no access. Open Settings and paste it again."
@@ -334,7 +340,10 @@ object SpeechToText {
             }
             val code = conn.responseCode
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
-            if (code !in 200..299) throw ApiException("Speech recognition error $code", code)
+            if (code !in 200..299) {
+                val safeBody = KeyVault.redactSecrets(text)
+                throw ApiException("Speech recognition error $code", code, safeBody)
+            }
             return text
         } catch (e: IOException) {
             throw ApiException("Network problem during speech recognition.")

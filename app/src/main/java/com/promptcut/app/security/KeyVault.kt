@@ -141,7 +141,7 @@ class KeyVault(
             return "${k.take(4)}••••${k.takeLast(4)}"
         }
 
-        /** Scrubs known API key formats and explicit secrets from logs or error messages. */
+        /** Scrubs known API key formats, header/query credentials, and explicit secrets from logs or error messages. */
         fun redactSecrets(text: String, knownKeys: Collection<String> = emptyList()): String {
             var out = text
             knownKeys.filter { it.length >= 6 }.forEach { k ->
@@ -151,6 +151,8 @@ class KeyVault(
             out = out.replace(Regex("sk-ant-[0-9A-Za-z_-]{16,}"), "sk-ant-••••")
             out = out.replace(Regex("gsk_[0-9A-Za-z_-]{16,}"), "gsk_••••")
             out = out.replace(Regex("sk-[0-9A-Za-z_-]{16,}"), "sk-••••")
+            out = out.replace(Regex("(?i)(Bearer\\s+)[A-Za-z0-9._\\-]{12,}"), "$1••••")
+            out = out.replace(Regex("(?i)((?:x-api-key|x-goog-api-key|api_key|key)\\s*[:=]\\s*)[^\\s,;\"'&]+"), "$1••••")
             return out
         }
     }

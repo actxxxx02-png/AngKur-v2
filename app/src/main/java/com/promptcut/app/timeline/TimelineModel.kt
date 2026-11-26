@@ -11,6 +11,7 @@ import com.promptcut.app.Segment
 import com.promptcut.app.Transition
 import java.util.UUID
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 const val US_PER_SEC = 1_000_000L
@@ -32,6 +33,49 @@ data class Keyframe(
     val value: Float,
 )
 
+/**
+ * Per-clip renderable visual effect parameters. Every field maps directly to a Media3
+ * Effect / GL shader or transition curve inside [Renderer] and [PreviewStage].
+ */
+data class EffectSettings(
+    val brightness: Float = 0f,
+    val contrast: Float = 0f,
+    val saturation: Float = 1f,
+    val blur: Float = 0f,
+    val sharpen: Float = 0f,
+    val vignette: Float = 0f,
+    val filmGrain: Float = 0f,
+    val glow: Float = 0f,
+    val shake: Float = 0f,
+    val fadeInUs: Long = 0L,
+    val fadeOutUs: Long = 0L,
+) {
+    val hasActiveAdjustments: Boolean
+        get() = kotlin.math.abs(brightness) > 0.01f ||
+            kotlin.math.abs(contrast) > 0.01f ||
+            kotlin.math.abs(saturation - 1f) > 0.01f ||
+            blur > 0.01f ||
+            sharpen > 0.01f ||
+            vignette > 0.01f ||
+            filmGrain > 0.01f ||
+            glow > 0.01f ||
+            shake > 0.01f ||
+            fadeInUs > 0L ||
+            fadeOutUs > 0L
+}
+
+data class SpeedRampPoint(
+    val progress: Float, // 0f..1f within segment
+    val speed: Double,   // 0.25..4.0
+)
+
+data class OverlayBounds(
+    val x: Float = 0.66f,
+    val y: Float = 0.06f,
+    val widthFraction: Float = 0.30f,
+    val opacity: Float = 1.0f,
+)
+
 data class VideoClipItem(
     val id: String = UUID.randomUUID().toString(),
     val sourceClipIndex: Int,
@@ -40,6 +84,7 @@ data class VideoClipItem(
     val sourceStartUs: Long,
     val sourceEndUs: Long,
     val speed: Double = 1.0,
+    val speedRamp: List<SpeedRampPoint> = emptyList(),
     val volume: Float = 1.0f,
     val muted: Boolean = false,
     val crop: CropBox? = null,
@@ -47,12 +92,20 @@ data class VideoClipItem(
     val transitionIn: Transition = Transition.CUT,
     val transitionDurationUs: Long = 350_000L,
     val colorLookOverride: ColorLook? = null,
+    val effects: EffectSettings = EffectSettings(),
+    val overlayBounds: OverlayBounds? = null,
     val keyframes: List<Keyframe> = emptyList(),
     val why: String = "",
     val editedByUser: Boolean = false,
 ) {
     val sourceDurationUs: Long get() = (sourceEndUs - sourceStartUs).coerceAtLeast(0L)
-    val timelineDurationUs: Long get() = (sourceDurationUs / speed.coerceIn(0.25, 4.0)).roundToLong().coerceAtLeast(100_000L)
+    val effectiveSpeed: Double
+        get() = if (speedRamp.size >= 2) {
+            speedRamp.map { it.speed.coerceIn(0.25, 4.0) }.average()
+        } else {
+            speed.coerceIn(0.25, 4.0)
+        }
+    val timelineDurationUs: Long get() = (sourceDurationUs / effectiveSpeed).roundToLong().coerceAtLeast(100_000L)
     val timelineEndUs: Long get() = timelineStartUs + timelineDurationUs
 }
 
@@ -62,6 +115,7 @@ data class VideoTrack(
     val isMain: Boolean = true,
     val muted: Boolean = false,
     val visible: Boolean = true,
+    val locked: Boolean = false,
     val items: List<VideoClipItem> = emptyList(),
 ) {
     val endUs: Long get() = items.maxOfOrNull { it.timelineEndUs } ?: 0L
@@ -97,7 +151,10 @@ data class AudioTrack(
     val name: String = "Audio 1",
     val type: AudioTrackType = AudioTrackType.MUSIC,
     val muted: Boolean = false,
+    val locked: Boolean = false,
     val volume: Float = 1.0f,
+    val voiceEnhance: Boolean = false,
+    val normalizeTargetDb: Float? = null,
     val items: List<AudioClipItem> = emptyList(),
 ) {
     val endUs: Long get() = items.maxOfOrNull { it.timelineEndUs } ?: 0L
@@ -109,6 +166,25 @@ enum class CaptionStyle(val label: String) {
     MINIMAL("Minimal"),
 }
 
+enum class CaptionFont(val label: String) {
+    SANS_BOLD("Clean Bold"),
+    CONDENSED("Condensed"),
+    MONO("Monospace"),
+}
+
+enum class CaptionAnimation(val label: String) {
+    NONE("Static"),
+    POP("Pop In"),
+    FADE("Fade"),
+    SLIDE_UP("Slide Up"),
+}
+
+data class WordTiming(
+    val word: String,
+    val startOffsetUs: Long,
+    val endOffsetUs: Long,
+)
+
 data class CaptionItem(
     val id: String = UUID.randomUUID().toString(),
     val startUs: Long,
@@ -117,6 +193,15 @@ data class CaptionItem(
     val style: CaptionStyle = CaptionStyle.SUBTITLE_BAR,
     val speaker: String? = null,
     val editedByUser: Boolean = false,
+    val wordTimings: List<WordTiming> = emptyList(),
+    val highlightKeywords: List<String> = emptyList(),
+    val positionYFraction: Float = 0.84f,
+    val font: CaptionFont = CaptionFont.SANS_BOLD,
+    val fontSizeSp: Int = 18,
+    val strokeWidth: Float = 2.0f,
+    val shadowEnabled: Boolean = true,
+    val bgAlpha: Float = 0.65f,
+    val animation: CaptionAnimation = CaptionAnimation.NONE,
 ) {
     val durationUs: Long get() = (endUs - startUs).coerceAtLeast(0L)
 }
@@ -125,6 +210,7 @@ data class CaptionTrack(
     val id: String = "captions_main",
     val name: String = "Captions",
     val visible: Boolean = true,
+    val locked: Boolean = false,
     val items: List<CaptionItem> = emptyList(),
 ) {
     val endUs: Long get() = items.maxOfOrNull { it.endUs } ?: 0L
@@ -137,22 +223,55 @@ data class TimelineProject(
     val createdAtMs: Long = System.currentTimeMillis(),
     val updatedAtMs: Long = System.currentTimeMillis(),
     val aspect: Aspect = Aspect.PORTRAIT,
+    val customAspectWidth: Int = 1080,
+    val customAspectHeight: Int = 1920,
     val fps: Int = 30,
     val resolution: ExportResolution = ExportResolution.P1080,
     val videoBitrateBps: Int = 8_000_000,
     val audioBitrateBps: Int = 192_000,
+    val preferredHevc: Boolean = false,
     val colorLook: ColorLook = ColorLook.NATURAL,
     val mood: Mood = Mood.HAPPY,
     val titleOverlay: String? = null,
     val summary: String = "",
+    val beatMarkersUs: List<Long> = emptyList(),
     val videoTracks: List<VideoTrack> = listOf(VideoTrack()),
     val audioTracks: List<AudioTrack> = listOf(AudioTrack()),
     val captionTracks: List<CaptionTrack> = listOf(CaptionTrack()),
     val legacyPlanJson: String? = null,
 ) {
     val mainVideoTrack: VideoTrack get() = videoTracks.firstOrNull { it.isMain } ?: videoTracks.firstOrNull() ?: VideoTrack()
+    val overlayVideoTrack: VideoTrack? get() = videoTracks.firstOrNull { !it.isMain }
     val mainCaptionTrack: CaptionTrack get() = captionTracks.firstOrNull() ?: CaptionTrack()
     val mainAudioTrack: AudioTrack get() = audioTracks.firstOrNull() ?: AudioTrack()
+
+    fun resolvedAspectRatio(): Float {
+        return when (aspect) {
+            Aspect.PORTRAIT -> 9f / 16f
+            Aspect.PORTRAIT_4_5 -> 4f / 5f
+            Aspect.LANDSCAPE -> 16f / 9f
+            Aspect.SQUARE -> 1f
+            Aspect.CUSTOM -> (customAspectWidth.coerceAtLeast(16).toFloat() / customAspectHeight.coerceAtLeast(16)).coerceIn(0.35f, 3.0f)
+        }
+    }
+
+    fun resolvedDimensions(shortEdge: Int): Pair<Int, Int> {
+        val even = { v: Int -> ((v + 1) / 2) * 2 }
+        return when (aspect) {
+            Aspect.PORTRAIT -> even(shortEdge) to even(shortEdge * 16 / 9)
+            Aspect.PORTRAIT_4_5 -> even(shortEdge) to even(shortEdge * 5 / 4)
+            Aspect.LANDSCAPE -> even(shortEdge * 16 / 9) to even(shortEdge)
+            Aspect.SQUARE -> even(shortEdge) to even(shortEdge)
+            Aspect.CUSTOM -> {
+                val ratio = resolvedAspectRatio()
+                if (ratio >= 1f) {
+                    even((shortEdge * ratio).roundToInt()) to even(shortEdge)
+                } else {
+                    even(shortEdge) to even((shortEdge / ratio).roundToInt())
+                }
+            }
+        }
+    }
 
     val totalDurationUs: Long
         get() = max(
@@ -172,6 +291,11 @@ data class TimelineProject(
             .flatMap { it.items }
             .filter { timeUs in it.startUs..it.endUs }
 
+    fun activeOverlaysAt(timeUs: Long): List<VideoClipItem> =
+        videoTracks.filter { !it.isMain && it.visible }
+            .flatMap { it.items }
+            .filter { timeUs in it.timelineStartUs..it.timelineEndUs }
+
     /**
      * Converts the main video track + project settings back into a Media3-compatible [EditPlan].
      */
@@ -181,15 +305,15 @@ data class TimelineProject(
                 clip = item.sourceClipIndex,
                 start = usToSec(item.sourceStartUs),
                 end = usToSec(item.sourceEndUs),
-                speed = item.speed,
+                speed = item.effectiveSpeed,
                 why = item.why,
-                sound = !item.muted,
+                sound = !item.muted && !mainVideoTrack.muted,
                 focusX = item.focusX,
-                soundGain = if (item.muted) 0.0 else item.volume.toDouble(),
+                soundGain = if (item.muted || mainVideoTrack.muted) 0.0 else item.volume.toDouble(),
             )
         }
         val firstTransition = mainVideoTrack.items.drop(1).firstOrNull()?.transitionIn ?: Transition.AUTO
-        val musicItem = mainAudioTrack.items.firstOrNull { it.trackType == AudioTrackType.MUSIC }
+        val musicItem = audioTracks.firstOrNull { !it.muted }?.items?.firstOrNull { it.trackType == AudioTrackType.MUSIC }
         return EditPlan(
             summary = summary.ifBlank { "Timeline edit (${segs.size} clips)" },
             aspect = aspect,
@@ -205,7 +329,7 @@ data class TimelineProject(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 2
+        const val CURRENT_SCHEMA_VERSION = 3
 
         fun empty(name: String = "Untitled Edit"): TimelineProject = TimelineProject(name = name)
 

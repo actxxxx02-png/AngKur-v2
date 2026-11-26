@@ -36,6 +36,10 @@ data class ClipInsight(
     val gamingEvents: List<String> = emptyList(),
     val ocrHighlights: List<String> = emptyList(),
     val silenceSpans: List<Span> = emptyList(),
+    val avgSharpness: Double = 0.0,
+    val avgLuma: Double = 0.0,
+    val avgMotion: Double = 0.0,
+    val openingHookScore: Double = 0.0,
 ) {
     val shotBoundaries: List<Double> get() = shots.drop(1).map { it.start }
 

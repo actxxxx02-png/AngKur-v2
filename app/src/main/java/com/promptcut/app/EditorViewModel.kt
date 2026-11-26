@@ -1,6 +1,7 @@
 package com.promptcut.app
 
 import android.app.Application
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.runtime.getValue
@@ -25,10 +26,15 @@ import com.promptcut.app.data.db.AppDatabase
 import com.promptcut.app.data.db.ProjectEntity
 import com.promptcut.app.data.db.ProjectRepository
 import com.promptcut.app.data.db.RenderJobEntity
+import com.promptcut.app.audio.SfxSynth
+import com.promptcut.app.audio.SfxType
+import com.promptcut.app.intelligence.CaptionTools
 import com.promptcut.app.intelligence.SfxCue
 import com.promptcut.app.intelligence.StoryAnalyzer
 import com.promptcut.app.intelligence.StoryBeat
 import com.promptcut.app.intelligence.VisualCache
+import com.promptcut.app.render.DeviceCapabilities
+import com.promptcut.app.render.ExportDiagnostics
 import com.promptcut.app.render.ExportPreset
 import com.promptcut.app.render.ExportSettings
 import com.promptcut.app.render.RenderJobState
@@ -36,9 +42,14 @@ import com.promptcut.app.render.RenderJobStatus
 import com.promptcut.app.render.RenderJobStore
 import com.promptcut.app.timeline.AudioClipItem
 import com.promptcut.app.timeline.AudioTrackType
+import com.promptcut.app.timeline.CaptionAnimation
+import com.promptcut.app.timeline.CaptionFont
 import com.promptcut.app.timeline.CaptionItem
 import com.promptcut.app.timeline.CaptionStyle
+import com.promptcut.app.timeline.EffectSettings
 import com.promptcut.app.timeline.Keyframe
+import com.promptcut.app.timeline.OverlayBounds
+import com.promptcut.app.timeline.SpeedRampPoint
 import com.promptcut.app.timeline.TimelineCommand
 import com.promptcut.app.timeline.TimelineEngine
 import com.promptcut.app.timeline.TimelineProject
@@ -88,9 +99,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     var playheadUs by mutableLongStateOf(0L)
     var isPlaying by mutableStateOf(false)
+    var previewSpeed by mutableFloatStateOf(1.0f)
+    var showSafeGuides by mutableStateOf(false)
+    var compareOriginal by mutableStateOf(false)
+    var audioMonitorMuted by mutableStateOf(false)
     var timelineZoom by mutableFloatStateOf(1.0f)
     var selectedVideoItemId by mutableStateOf<String?>(null)
     var selectedCaptionId by mutableStateOf<String?>(null)
+
+    val deviceCapabilities: DeviceCapabilities by lazy { DeviceCapabilities.probe(app) }
+    val missingAssetIndices = mutableStateListOf<Int>()
 
     // Visual strip & waveform caches
     val segmentThumbnails = mutableStateMapOf<String, List<Bitmap>>()
@@ -135,12 +153,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     var exportSettings by mutableStateOf(
         ExportSettings(
-            resolution = if (settings.preview720pMode) ExportResolution.P720 else settings.preferredResolution,
+            resolution = settings.preferredResolution,
             fps = settings.preferredFps,
             videoBitrateBps = settings.preferredBitrateMbps * 1_000_000,
+            audioBitrateBps = settings.preferredAudioBitrateKbps * 1000,
+            useHevc = settings.preferredCodecHevc,
             forceSafeMode = settings.safeRender,
         )
     )
+    var exportDiagnostics by mutableStateOf<ExportDiagnostics?>(null)
+        private set
 
     fun isOn(o: Opt) = o !in off
     fun unset(o: Opt) {
@@ -254,17 +276,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun triggerAutosave() {
-        if (clips.isEmpty() && _timelineProject.value.mainVideoTrack.items.isEmpty()) return
+        val current = _timelineProject.value
+        if (clips.isEmpty() && current.mainVideoTrack.items.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
+                val thumbPath = clips.firstOrNull()?.thumbnail?.let { bmp ->
+                    repo.saveProjectThumbnail(ctx, current.id, bmp)
+                }
                 repo.autosaveProject(
-                    project = _timelineProject.value,
+                    project = current,
                     clips = clips.map { it.meta },
                     clipUris = clips.associate { it.meta.index to it.uri.toString() },
                     clipHdr = clips.associate { it.meta.index to it.isHdr },
                     clipCuts = clipCuts.toMap(),
                     conversation = conversation,
                     lastOutputPath = output?.absolutePath,
+                    thumbnailPath = thumbPath,
+                    lastExportDiagnosticsJson = exportDiagnostics?.toJson(),
                 )
             }
         }
@@ -305,17 +333,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun trimVideoItemEdges(itemId: String, newSourceStartUs: Long, newSourceEndUs: Long) {
+        val item = _timelineProject.value.mainVideoTrack.items.firstOrNull { it.id == itemId } ?: return
+        val maxUs = clips.firstOrNull { it.meta.index == item.sourceClipIndex }?.meta?.durationSec?.let(::secToUs) ?: Long.MAX_VALUE
+        when (val r = engine.execute(TimelineCommand.TrimVideoClip(item.id, newSourceStartUs, newSourceEndUs, maxUs))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
     fun deleteSelectedSegment() {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.DeleteVideoClip(item.id)).isSuccess) {
-            selectedVideoItemId = null
-            syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.DeleteVideoClip(item.id))) {
+            is AppResult.Success -> {
+                selectedVideoItemId = null
+                syncFromEngine()
+            }
+            is AppResult.Failure -> status = r.error.message
         }
     }
 
     fun duplicateSelectedSegment() {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.DuplicateVideoClip(item.id)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.DuplicateVideoClip(item.id))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun moveSelectedSegment(delta: Int) {
@@ -324,27 +367,242 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (idx < 0) return
         val target = (idx + delta).coerceIn(0, items.lastIndex)
         if (target == idx) return
-        if (engine.execute(TimelineCommand.ReorderVideoClips(idx, target)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.ReorderVideoClips(idx, target))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun setSelectedSpeed(speed: Double) {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.SetClipSpeed(item.id, speed)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.SetClipSpeed(item.id, speed))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun setSelectedSpeedRamp(points: List<SpeedRampPoint>) {
+        val item = selectedVideoItem() ?: return
+        when (val r = engine.execute(TimelineCommand.SetClipSpeedRamp(item.id, points))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun setSelectedAudio(volume: Float, muted: Boolean) {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.SetClipVolume(item.id, volume, muted)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.SetClipVolume(item.id, volume, muted))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun setSelectedTransition(t: Transition) {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.SetClipTransition(item.id, t)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.SetClipTransition(item.id, t))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun setSelectedEffects(effects: EffectSettings) {
+        val item = selectedVideoItem() ?: return
+        when (val r = engine.execute(TimelineCommand.SetClipEffects(item.id, effects))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun addOrUpdateSelectedKeyframe(keyframe: Keyframe) {
         val item = selectedVideoItem() ?: return
-        if (engine.execute(TimelineCommand.UpsertKeyframe(item.id, keyframe)).isSuccess) syncFromEngine()
+        when (val r = engine.execute(TimelineCommand.UpsertKeyframe(item.id, keyframe))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun addOverlayClipFromClip(
+        clipIndex: Int,
+        startSec: Double = usToSec(playheadUs),
+        endSec: Double? = null,
+        bounds: OverlayBounds = OverlayBounds(),
+    ) {
+        val c = clips.firstOrNull { it.meta.index == clipIndex } ?: return
+        val srcEnd = endSec?.let(::secToUs)?.coerceAtMost(secToUs(c.meta.durationSec))
+            ?: minOf(secToUs(c.meta.durationSec), 4_000_000L)
+        if (srcEnd < TimelineEngine.MIN_CLIP_US) return
+        val ovItem = VideoClipItem(
+            sourceClipIndex = c.meta.index,
+            sourceUri = c.uri.toString(),
+            timelineStartUs = secToUs(startSec),
+            sourceStartUs = 0L,
+            sourceEndUs = srcEnd,
+            muted = true,
+            overlayBounds = bounds,
+            why = "V2 PIP #${c.meta.index + 1}",
+            editedByUser = true,
+        )
+        when (val r = engine.execute(TimelineCommand.AddVideoClip(ovItem, trackId = "video_overlay"))) {
+            is AppResult.Success -> {
+                syncFromEngine()
+                status = "Added Clip #${c.meta.index + 1} to V2 Overlay."
+            }
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun updateOverlayBounds(itemId: String, bounds: OverlayBounds) {
+        when (val r = engine.execute(TimelineCommand.SetOverlayBounds(itemId, bounds, trackId = "video_overlay"))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun removeOverlayItem(itemId: String) {
+        when (val r = engine.execute(TimelineCommand.DeleteVideoClip(itemId, trackId = "video_overlay"))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun toggleTrackLock(trackId: String) {
+        if (engine.execute(TimelineCommand.ToggleTrackLock(trackId)).isSuccess) syncFromEngine()
+    }
+
+    fun toggleTrackVisibility(trackId: String) {
+        if (engine.execute(TimelineCommand.ToggleTrackVisibility(trackId)).isSuccess) syncFromEngine()
+    }
+
+    fun trimSelectedSilence() {
+        val item = selectedVideoItem() ?: return
+        val clip = clips.firstOrNull { it.meta.index == item.sourceClipIndex } ?: return
+        val spans = insights[item.sourceClipIndex]?.silenceSpans.orEmpty()
+        if (spans.isEmpty()) {
+            status = "No detected silent sections in Clip #${item.sourceClipIndex + 1}."
+            return
+        }
+        var newStartUs = item.sourceStartUs
+        var newEndUs = item.sourceEndUs
+        for (sp in spans) {
+            val spStartUs = secToUs(sp.start)
+            val spEndUs = secToUs(sp.end)
+            if (spStartUs <= newStartUs + 150_000L && spEndUs > newStartUs && spEndUs < newEndUs - TimelineEngine.MIN_CLIP_US) {
+                newStartUs = spEndUs
+            } else if (spEndUs >= newEndUs - 150_000L && spStartUs < newEndUs && spStartUs > newStartUs + TimelineEngine.MIN_CLIP_US) {
+                newEndUs = spStartUs
+            }
+        }
+        val maxUs = secToUs(clip.meta.durationSec)
+        if (newStartUs == item.sourceStartUs && newEndUs == item.sourceEndUs) {
+            status = "No leading/trailing silence to trim on this segment."
+            return
+        }
+        when (val r = engine.execute(TimelineCommand.TrimVideoClip(item.id, newStartUs, newEndUs, maxUs))) {
+            is AppResult.Success -> {
+                syncFromEngine()
+                status = "Trimmed silent edges on Clip #${item.sourceClipIndex + 1}."
+            }
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun detectBeatMarkersForProject() {
+        val musicUri = when (musicSource) {
+            MusicSource.MY_SONG -> song?.uri
+            MusicSource.LIBRARY -> libSong?.uri
+            else -> _timelineProject.value.mainAudioTrack.items.firstOrNull()?.sourceUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+                ?: clips.firstOrNull { it.meta.hasAudio }?.uri
+        }
+        if (musicUri == null) {
+            status = "Select a song or clip with audio first to detect beats."
+            return
+        }
+        viewModelScope.launch {
+            status = "Detecting musical beats…"
+            val beats = withContext(Dispatchers.Default) { AudioTools.detectBeats(ctx, musicUri) }
+            if (beats.isEmpty()) {
+                status = "No clear beats detected."
+                return@launch
+            }
+            engine.execute(TimelineCommand.SetBeatMarkers(beats))
+            syncFromEngine()
+            status = "Detected ${beats.size} beat markers."
+        }
+    }
+
+    fun snapCutsToNearestBeat() {
+        val beats = _timelineProject.value.beatMarkersUs
+        if (beats.isEmpty()) {
+            status = "Detect beats first before snapping cuts."
+            return
+        }
+        val items = _timelineProject.value.mainVideoTrack.items
+        if (items.size <= 1) return
+        val maxDurMap = clips.associate { it.meta.index to secToUs(it.meta.durationSec) }
+        val cmds = mutableListOf<TimelineCommand>()
+        items.forEach { item ->
+            val targetEnd = beats.minByOrNull { kotlin.math.abs(it - item.timelineEndUs) } ?: return@forEach
+            val deltaOut = targetEnd - item.timelineEndUs
+            if (kotlin.math.abs(deltaOut) in 40_000L..450_000L) {
+                val maxSrc = maxDurMap[item.sourceClipIndex] ?: Long.MAX_VALUE
+                val candidateEnd = (item.sourceEndUs + (deltaOut * item.effectiveSpeed).toLong())
+                    .coerceIn(item.sourceStartUs + TimelineEngine.MIN_CLIP_US, maxSrc)
+                if (candidateEnd != item.sourceEndUs) {
+                    cmds += TimelineCommand.TrimVideoClip(item.id, item.sourceStartUs, candidateEnd, maxSrc)
+                }
+            }
+        }
+        if (cmds.isEmpty()) {
+            status = "Cuts are already aligned with beat markers."
+            return
+        }
+        when (val r = engine.execute(TimelineCommand.Batch(cmds, "Snap cuts to beat"))) {
+            is AppResult.Success -> {
+                syncFromEngine()
+                status = "Snapped ${cmds.size} cut(s) to beats."
+            }
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun insertSfxAtPlayhead(type: SfxType) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { SfxSynth.ensureCachedWav(ctx, type) }
+            withContext(Dispatchers.Main) {
+                val sfxItem = AudioClipItem(
+                    title = type.label,
+                    sourceUri = "sfx://${type.key}",
+                    trackType = AudioTrackType.SFX,
+                    timelineStartUs = playheadUs,
+                    durationUs = secToUs(type.durationSec),
+                    volume = 0.85f,
+                    fadeInUs = 10_000L,
+                    fadeOutUs = 50_000L,
+                    duckUnderSpeech = false,
+                    editedByUser = true,
+                )
+                when (val r = engine.execute(TimelineCommand.AddAudioItem(sfxItem, trackId = "audio_sfx"))) {
+                    is AppResult.Success -> {
+                        syncFromEngine()
+                        status = "Inserted ${type.label} SFX."
+                    }
+                    is AppResult.Failure -> status = r.error.message
+                }
+            }
+        }
+    }
+
+    fun setAudioTrackMix(
+        trackId: String,
+        volume: Float,
+        muted: Boolean,
+        voiceEnhance: Boolean? = null,
+        normalizeTargetDb: Float? = null,
+    ) {
+        when (val r = engine.execute(TimelineCommand.SetAudioTrackMix(trackId, volume, muted, voiceEnhance, normalizeTargetDb))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
     }
 
     fun setProjectLook(look: ColorLook) {
@@ -363,6 +621,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun updateCustomAspect(width: Int, height: Int) {
+        val w = width.coerceIn(240, 4096)
+        val h = height.coerceIn(240, 4096)
+        aspect = Aspect.CUSTOM
+        exportSettings = exportSettings.copy(customAspectWidth = w, customAspectHeight = h)
+        engine.execute(TimelineCommand.SetProjectStyle(aspect = Aspect.CUSTOM, customAspectWidth = w, customAspectHeight = h))
+        syncFromEngine()
+    }
+
     fun setProjectTitle(title: String?) {
         val clean = title?.trim()?.ifBlank { null }
         engine.execute(TimelineCommand.SetProjectStyle(titleOverlay = clean, clearTitle = clean == null))
@@ -370,20 +637,62 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun generateCaptionsFromSpeech(style: CaptionStyle = CaptionStyle.SUBTITLE_BAR) {
-        val captions = StoryAnalyzer.generateCaptionsForTimeline(_timelineProject.value, insights, style)
-        if (captions.isEmpty()) {
+        val raw = StoryAnalyzer.generateCaptionsForTimeline(_timelineProject.value, insights, style)
+        if (raw.isEmpty()) {
             status = "No speech found yet. Configure Groq for accurate speech-to-text or add captions manually."
             return
         }
-        engine.execute(TimelineCommand.ReplaceCaptions(captions))
-        syncFromEngine()
-        status = "Added ${captions.size} synchronized caption(s)."
+        val enriched = raw.map { CaptionTools.enrichCaption(it, applyPunctuation = true, highlightKeywords = true) }
+        when (val r = engine.execute(TimelineCommand.ReplaceCaptions(enriched))) {
+            is AppResult.Success -> {
+                syncFromEngine()
+                status = "Added ${enriched.size} synchronized caption(s)."
+            }
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun applyCaptionFormattingToAll(
+        style: CaptionStyle,
+        font: CaptionFont,
+        fontSizeSp: Int,
+        positionYFraction: Float,
+        animation: CaptionAnimation,
+        applyPunctuation: Boolean,
+        highlightKeywords: Boolean,
+    ) {
+        val current = _timelineProject.value.mainCaptionTrack.items
+        if (current.isEmpty()) return
+        val updated = current.map { cap ->
+            CaptionTools.enrichCaption(
+                cap.copy(
+                    style = style,
+                    font = font,
+                    fontSizeSp = fontSizeSp.coerceIn(14, 34),
+                    positionYFraction = CaptionTools.clampSafeAreaY(positionYFraction),
+                    animation = animation,
+                    editedByUser = true,
+                ),
+                applyPunctuation = applyPunctuation,
+                highlightKeywords = highlightKeywords,
+            )
+        }
+        when (val r = engine.execute(TimelineCommand.ReplaceCaptions(updated))) {
+            is AppResult.Success -> syncFromEngine()
+            is AppResult.Failure -> status = r.error.message
+        }
+    }
+
+    fun exportCaptionsText(asVtt: Boolean): String {
+        val items = _timelineProject.value.mainCaptionTrack.items
+        return if (asVtt) CaptionTools.exportVtt(items) else CaptionTools.exportSrt(items)
     }
 
     fun upsertCaption(caption: CaptionItem) {
-        when (val r = engine.execute(TimelineCommand.AddOrUpdateCaption(caption))) {
+        val enriched = CaptionTools.enrichCaption(caption, applyPunctuation = false, highlightKeywords = caption.highlightKeywords.isNotEmpty())
+        when (val r = engine.execute(TimelineCommand.AddOrUpdateCaption(enriched))) {
             is AppResult.Success -> {
-                selectedCaptionId = caption.id
+                selectedCaptionId = enriched.id
                 syncFromEngine()
             }
             is AppResult.Failure -> status = r.error.message
@@ -396,6 +705,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             syncFromEngine()
         }
     }
+
+    fun editHistoryEntries(): List<String> = engine.historyEntries()
 
     // ------------------------------------------------------------------ Clips & Understanding
 
@@ -480,9 +791,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         analysisJob = viewModelScope.launch {
             analyzing = true
             try {
-                val groqKey = settings.key(Provider.GROQ)
+                val hasGroq = settings.keyManager.hasEligibleKey(ProviderId.GROQ)
                 val stt: (suspend (File) -> List<Span>)? =
-                    if (groqKey.isNotBlank() && settings.privacy.allowAudioToGroqStt) { f -> SpeechToText.groq(groqKey, f) } else null
+                    if (hasGroq && settings.privacy.allowAudioToGroqStt) {
+                        { f ->
+                            when (val r = router.transcribeAudioWithGroq(f)) {
+                                is AppResult.Success -> r.value
+                                is AppResult.Failure -> throw ApiException(r.error.message)
+                            }
+                        }
+                    } else null
                 for (i in clips.indices) {
                     val clip = clips.getOrNull(i) ?: break
                     if (insights.containsKey(clip.meta.index)) continue
@@ -826,13 +1144,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun renderTimelineOnly() {
+    fun renderTimelineOnly(previewOnly: Boolean = false) {
         if (clips.isEmpty() || _timelineProject.value.mainVideoTrack.items.isEmpty() || busy) return
         job?.cancel()
         job = viewModelScope.launch {
             busy = true
             try {
-                renderCurrentTimeline(targetSec = askedLengthSec)
+                renderCurrentTimeline(targetSec = askedLengthSec, previewOnly = previewOnly)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -845,7 +1163,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun renderCurrentTimeline(targetSec: Double?) {
+    fun renderQuickPreviewExport() = renderTimelineOnly(previewOnly = true)
+
+    private suspend fun renderCurrentTimeline(targetSec: Double?, previewOnly: Boolean = false) {
         val currentProject = _timelineProject.value
         if (currentProject.mainVideoTrack.items.isEmpty()) return
 
@@ -878,14 +1198,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         saveJob(RenderJobStatus.RENDERING, 0, "Exporting video…")
-        status = "Exporting ${exportSettings.resolution.label}…"
+        status = if (previewOnly) "Exporting 720p quick preview…" else "Exporting ${exportSettings.resolution.label}…"
         output = null
         progress = 0
 
-        val effectiveSettings = exportSettings.copy(forceSafeMode = exportSettings.forceSafeMode || settings.safeRender)
+        val effectiveSettings = exportSettings.copy(
+            forceSafeMode = exportSettings.forceSafeMode || settings.safeRender,
+            previewOnly = previewOnly,
+            customAspectWidth = currentProject.customAspectWidth,
+            customAspectHeight = currentProject.customAspectHeight,
+        )
         var usedSafe = false
-        val video = try {
-            Renderer.renderProject(
+        val (video, diag) = try {
+            Renderer.renderProjectWithDiagnostics(
                 context = ctx,
                 project = currentProject,
                 clips = clips.toList(),
@@ -907,6 +1232,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             throw e
         }
 
+        exportDiagnostics = diag
         if (usedSafe) settings.safeRender = true
         status = "Running Quality Check…"
         progress = -1
@@ -916,12 +1242,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             project = currentProject,
             clips = clips.toList(),
             insights = insights.toMap(),
-            expectMusic = music != null,
+            expectMusic = music != null || currentProject.audioTracks.any { !it.muted && it.items.isNotEmpty() },
             expectSound = currentProject.mainVideoTrack.items.any { !it.muted && it.volume > 0.02f },
             targetSec = targetSec,
         )
         output = video
         qa = report
+        withContext(Dispatchers.IO) {
+            runCatching { repo.recordExportDiagnostics(currentProject.id, video.absolutePath, diag.toJson()) }
+        }
         saveJob(RenderJobStatus.COMPLETED, 100, "Export ready", video.absolutePath)
         WorkService.notifyCompleted(ctx, "Export ready", currentProject.name)
         triggerAutosave()
@@ -935,6 +1264,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val fixed = _timelineProject.value.mainCaptionTrack.items
                 engine.execute(TimelineCommand.ReplaceCaptions(fixed))
                 syncFromEngine()
+            }
+            QaIssue.CAPTION_READABILITY -> {
+                val fixed = QualityCheck.repairCaptionReadability(_timelineProject.value)
+                engine.execute(TimelineCommand.ReplaceCaptions(fixed))
+                syncFromEngine()
+            }
+            QaIssue.EXPORT_CORRUPTION -> {
+                settings.safeRender = true
+                exportSettings = exportSettings.copy(forceSafeMode = true)
             }
             QaIssue.ROTATION -> {
                 val file = output ?: return
@@ -997,7 +1335,49 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyExportPreset(preset: ExportPreset) {
         exportSettings = exportSettings.applyPreset(preset)
-        engine.execute(TimelineCommand.SetExportConfig(preset.resolution, preset.fps, preset.bitrateMbps * 1_000_000))
+        settings.preferredResolution = preset.resolution
+        settings.preferredFps = preset.fps
+        settings.preferredBitrateMbps = preset.bitrateMbps
+        engine.execute(
+            TimelineCommand.SetExportConfig(
+                resolution = preset.resolution,
+                fps = preset.fps,
+                videoBitrateBps = preset.bitrateMbps * 1_000_000,
+                audioBitrateBps = exportSettings.audioBitrateBps,
+                preferredHevc = exportSettings.useHevc,
+            )
+        )
+        syncFromEngine()
+    }
+
+    fun updateAudioBitrate(kbps: Int) {
+        val clean = kbps.coerceIn(96, 320)
+        settings.preferredAudioBitrateKbps = clean
+        exportSettings = exportSettings.copy(audioBitrateBps = clean * 1000)
+        engine.execute(
+            TimelineCommand.SetExportConfig(
+                resolution = exportSettings.resolution,
+                fps = exportSettings.fps,
+                videoBitrateBps = exportSettings.videoBitrateBps,
+                audioBitrateBps = clean * 1000,
+                preferredHevc = exportSettings.useHevc,
+            )
+        )
+        syncFromEngine()
+    }
+
+    fun setUseHevc(enabled: Boolean) {
+        settings.preferredCodecHevc = enabled
+        exportSettings = exportSettings.copy(useHevc = enabled)
+        engine.execute(
+            TimelineCommand.SetExportConfig(
+                resolution = exportSettings.resolution,
+                fps = exportSettings.fps,
+                videoBitrateBps = exportSettings.videoBitrateBps,
+                audioBitrateBps = exportSettings.audioBitrateBps,
+                preferredHevc = enabled,
+            )
+        )
         syncFromEngine()
     }
 
@@ -1027,26 +1407,69 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openSavedProject(projectId: String) {
         viewModelScope.launch {
-            when (val r = repo.loadProject(projectId)) {
+            when (val r = repo.loadProject(projectId, ctx)) {
                 is AppResult.Success -> {
                     val loaded = r.value
                     startOver()
                     engine.reset(loaded.timeline)
                     conversation.restoreFromJson(loaded.conversationJson)
                     loaded.clipCuts.forEach { (k, v) -> clipCuts[k] = v }
+                    missingAssetIndices.clear()
+                    missingAssetIndices += loaded.missingAssetIndices
+                    exportDiagnostics = ExportDiagnostics.fromJson(loaded.entity.lastExportDiagnosticsJson)
                     val uris = loaded.assets.mapNotNull { a -> a.uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } }
                     if (uris.isNotEmpty()) {
                         val reloaded = ClipAnalyzer.load(ctx, uris, 0)
                         clips += reloaded
+                        reloaded.forEach { c ->
+                            if (c.meta.hasAudio) {
+                                viewModelScope.launch {
+                                    clipWaveforms[c.meta.index] = VisualCache.getWaveform(ctx, c.uri, "clip_${c.meta.index}")
+                                }
+                            }
+                        }
                     }
                     loaded.entity.lastOutputPath?.let { path ->
                         File(path).takeIf { it.exists() }?.let { output = it }
                     }
                     syncFromEngine(autosave = false)
                     showProjectsSheet = false
-                    status = "Loaded \"${loaded.timeline.name}\""
+                    status = if (loaded.missingAssetIndices.isEmpty()) {
+                        "Loaded \"${loaded.timeline.name}\""
+                    } else {
+                        "Loaded \"${loaded.timeline.name}\" (${loaded.missingAssetIndices.size} missing clip(s) — relink in Projects)."
+                    }
                 }
                 is AppResult.Failure -> status = r.error.message
+            }
+        }
+    }
+
+    fun relinkMissingClip(clipIndex: Int, newUri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                ctx.contentResolver.takePersistableUriPermission(newUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val displayName = EditorMediaHelper.displayName(ctx, newUri)
+            when (val res = repo.relinkAsset(ctx, _timelineProject.value.id, clipIndex, newUri.toString(), displayName)) {
+                is AppResult.Success -> {
+                    val loaded = res.value
+                    engine.reset(loaded.timeline)
+                    missingAssetIndices.clear()
+                    missingAssetIndices += loaded.missingAssetIndices
+                    val freshlyLoaded = ClipAnalyzer.load(ctx, listOf(newUri), clipIndex)
+                    if (freshlyLoaded.isNotEmpty()) {
+                        val reloadedClip = freshlyLoaded.first()
+                        clips.removeAll { it.meta.index == clipIndex }
+                        clips += Clip(reloadedClip.uri, reloadedClip.meta.copy(index = clipIndex), reloadedClip.thumbnail, reloadedClip.isHdr)
+                        if (reloadedClip.meta.hasAudio) {
+                            clipWaveforms[clipIndex] = VisualCache.getWaveform(ctx, newUri, "clip_$clipIndex")
+                        }
+                    }
+                    syncFromEngine(autosave = false)
+                    status = "Relinked clip #${clipIndex + 1}."
+                }
+                is AppResult.Failure -> status = res.error.message
             }
         }
     }

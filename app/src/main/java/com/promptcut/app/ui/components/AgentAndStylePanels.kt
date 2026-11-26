@@ -2,7 +2,6 @@ package com.promptcut.app.ui.components
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.net.Uri
 import androidx.annotation.OptIn as AndroidXOptIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -19,7 +18,6 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -150,17 +148,17 @@ fun AgentPanel(
             }
         }
 
-        // Manual-edit protection approval card
+        // Manual-edit / destructive-change protection approval card
         vm.pendingManualEditReason?.let { reason ->
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth().testTag("manual_edit_approval_card"),
                 border = CardDefaults.outlinedCardBorder().copy(width = 1.5.dp),
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Manual Timeline Protection", style = MaterialTheme.typography.titleSmall)
+                    Text("Timeline Edit Confirmation", style = MaterialTheme.typography.titleSmall)
                     Text(reason, style = MaterialTheme.typography.bodySmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { vm.dismissManualEditApproval() }) { Text("Keep Manual") }
+                        OutlinedButton(onClick = { vm.dismissManualEditApproval() }) { Text("Keep Existing") }
                         Button(onClick = { vm.approveManualEditOverwrite() }) { Text("Approve AI Change") }
                     }
                 }
@@ -192,14 +190,15 @@ fun AgentPanel(
             }
         }
 
-        // Quick Agent Prompts
+        // V3 Quick Agent Prompts
         if (vm.clips.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(
                     "30s Gaming Edit" to "Create a 30-second gaming edit starting with the best moment, remove boring parts, add subtitles, sync with music, and make a strong ending.",
-                    "Make opening faster" to "Make the opening 30% faster and punchier.",
-                    "Add subtitles" to "Add synchronized subtitles to the timeline.",
-                    "Remove boring pauses" to "Trim silent and dull sections while keeping speech.",
+                    "Sync cuts to beat" to "Detect beats and snap video cuts cleanly to the musical beat.",
+                    "Trim silences" to "Trim silent and dull sections while keeping speech.",
+                    "Film grain & vignette" to "Add subtle cinematic vignette and film grain to the clips.",
+                    "Keyword captions" to "Add bold captions with auto-punctuation and highlight important keywords.",
                 ).forEach { (title, prompt) ->
                     AssistChip(
                         onClick = { onQuickPrompt(prompt) },
@@ -212,7 +211,7 @@ fun AgentPanel(
         // Chat log
         if (vm.chat.isEmpty()) {
             Text(
-                "Describe an entire edit or quick change in plain language. Context and manual edits are remembered across turns.",
+                "Describe an entire edit or quick change in plain language. Context, track locks, and manual edits are respected across turns.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -253,6 +252,10 @@ private fun ChatBubble(m: ChatMessage) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun StylePanel(vm: EditorViewModel, pickSong: () -> Unit, onCreate: () -> Unit) {
+    val project by androidx.compose.runtime.rememberUpdatedState(vm.timelineProject.value)
+    var customW by remember(project.customAspectWidth) { mutableStateOf(project.customAspectWidth.toString()) }
+    var customH by remember(project.customAspectHeight) { mutableStateOf(project.customAspectHeight.toString()) }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         val s = vm.suggestions
         when {
@@ -260,7 +263,7 @@ fun StylePanel(vm: EditorViewModel, pickSong: () -> Unit, onCreate: () -> Unit) 
                 Column(Modifier.padding(12.dp)) {
                     Text("Analyzing footage on-device…", fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Detecting scenes, faces, smiles, HUD/gaming text, audio peaks, and speech.",
+                        "Detecting scenes, faces, smiles, sharpness, audio peaks, and speech.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -284,8 +287,11 @@ fun StylePanel(vm: EditorViewModel, pickSong: () -> Unit, onCreate: () -> Unit) 
                         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(p.name, fontWeight = FontWeight.SemiBold)
                             Text(p.description, style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                            Text("${p.lengthSec}s · ${p.aspect.key} · ${p.color.label}", style = MonoTimecodeStyle,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "${p.lengthSec}s · ${p.aspect.key} · ${p.color.label}",
+                                style = MonoTimecodeStyle,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -302,6 +308,15 @@ fun StylePanel(vm: EditorViewModel, pickSong: () -> Unit, onCreate: () -> Unit) 
         OptRow(vm, Opt.MOOD, "Mood", Mood.entries, vm.mood, { it.label }) { vm.mood = it }
         OptRow(vm, Opt.LENGTH, "Duration", LENGTHS, vm.lengthSec, { when { it == 0 -> "Auto"; it >= 120 -> "${it / 60}m"; else -> "${it}s" } }) { vm.setLength(it) }
         OptRow(vm, Opt.FORMAT, "Aspect", Aspect.entries, vm.aspect, { it.label }) { vm.setProjectAspect(it) }
+        if (vm.aspect == Aspect.CUSTOM) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(value = customW, onValueChange = { customW = it }, label = { Text("Width") }, singleLine = true, modifier = Modifier.weight(1f))
+                OutlinedTextField(value = customH, onValueChange = { customH = it }, label = { Text("Height") }, singleLine = true, modifier = Modifier.weight(1f))
+                Button(onClick = {
+                    vm.updateCustomAspect(customW.toIntOrNull() ?: 1080, customH.toIntOrNull() ?: 1350)
+                }) { Text("Set") }
+            }
+        }
         OptRow(vm, Opt.LOOK, "Look", ColorLook.entries, vm.color, { it.label }) { vm.setProjectLook(it) }
         OptRow(vm, Opt.TRANSITION, "Transitions", Transition.entries, vm.transition, {
             if (it == Transition.AUTO) "Auto (${Transition.forMood(vm.mood).label})" else it.label

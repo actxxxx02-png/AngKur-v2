@@ -31,7 +31,7 @@ object ClipUnderstanding {
     private const val MAX_SAMPLES_PER_CLIP = 240
     private const val STT_CHUNK_SEC = 600.0
 
-    /** Short clips: ~2 frames/s. Long clips: more frames in total but further apart (a 1-hour video ≈ every 15 s). */
+    /** Short clips: adaptive ~2 frames/s (capped at 40). Long clips: scales smoothly up to 240 samples. */
     fun sampleCount(durationSec: Double): Int =
         if (durationSec <= 60) (durationSec / 0.5).toInt().coerceIn(1, SHORT_CLIP_SAMPLES)
         else (SHORT_CLIP_SAMPLES + (durationSec - 60) / 5).toInt().coerceAtMost(MAX_SAMPLES_PER_CLIP)
@@ -261,6 +261,11 @@ object ClipUnderstanding {
         }.distinct().take(6)
         val gamingNotes = gamingMoments.map { "${round1(it.timeSec)}s: ${it.type.label} [${it.source}]" }.distinct().take(10)
 
+        val avgSharp = samples.map { it.sharp }.average().let { if (it.isNaN()) 0.0 else it }
+        val avgLuma = samples.map { it.luma }.average().let { if (it.isNaN()) 0.0 else it }
+        val avgMotion = samples.map { it.motion }.average().let { if (it.isNaN()) 0.0 else it }
+        val openingHook = scored.filter { it.time <= 3.0 }.maxOfOrNull { it.score } ?: 0.0
+
         return ClipInsight(
             clip = meta.index,
             shots = shots,
@@ -272,6 +277,10 @@ object ClipUnderstanding {
             gamingEvents = gamingNotes,
             ocrHighlights = ocrNotes,
             silenceSpans = silence,
+            avgSharpness = avgSharp,
+            avgLuma = avgLuma,
+            avgMotion = avgMotion,
+            openingHookScore = openingHook,
         )
     }
 

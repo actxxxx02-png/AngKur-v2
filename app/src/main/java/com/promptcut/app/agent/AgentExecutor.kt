@@ -3,8 +3,10 @@ package com.promptcut.app.agent
 import com.promptcut.app.ClipInsight
 import com.promptcut.app.ClipMeta
 import com.promptcut.app.EditPlan
+import com.promptcut.app.audio.SfxType
 import com.promptcut.app.core.AppError
 import com.promptcut.app.core.AppResult
+import com.promptcut.app.intelligence.CaptionTools
 import com.promptcut.app.intelligence.StoryAnalyzer
 import com.promptcut.app.round1
 import com.promptcut.app.timeline.AudioClipItem
@@ -13,9 +15,12 @@ import com.promptcut.app.timeline.CaptionItem
 import com.promptcut.app.timeline.TimelineCommand
 import com.promptcut.app.timeline.TimelineEngine
 import com.promptcut.app.timeline.TimelineProject
+import com.promptcut.app.timeline.VideoClipItem
 import com.promptcut.app.timeline.secToUs
 import com.promptcut.app.timeline.usToSec
 import java.util.UUID
+import kotlin.math.abs
+import kotlin.math.roundToLong
 
 data class ExecutionOutcome(
     val steps: List<AgentStep>,
@@ -59,8 +64,11 @@ class AgentExecutor(
                 fps = engine.project.fps,
                 resolution = engine.project.resolution,
                 videoBitrateBps = engine.project.videoBitrateBps,
+                audioBitrateBps = engine.project.audioBitrateBps,
+                preferredHevc = engine.project.preferredHevc,
                 audioTracks = engine.project.audioTracks,
                 captionTracks = engine.project.captionTracks,
+                beatMarkersUs = engine.project.beatMarkersUs,
             )
             commands += TimelineCommand.ReplaceProject(next, label = "AI Edit", byUser = false)
             steps += AgentStep("apply_edit_plan", "Built timeline (${replacementPlan.segments.size} shots, ${round1(replacementPlan.totalSec)}s)", true)
@@ -125,8 +133,13 @@ class AgentExecutor(
                 }
 
                 is AgentToolInvocation.SetCropResize -> {
-                    if (tool.aspect != null) {
-                        commands += TimelineCommand.SetProjectStyle(aspect = tool.aspect, byUser = false)
+                    if (tool.aspect != null || tool.customWidth != null || tool.customHeight != null) {
+                        commands += TimelineCommand.SetProjectStyle(
+                            aspect = tool.aspect,
+                            customAspectWidth = tool.customWidth,
+                            customAspectHeight = tool.customHeight,
+                            byUser = false,
+                        )
                     }
                     if (tool.crop != null) {
                         val targets = if (tool.itemId != null) listOf(tool.itemId) else referenceProject.mainVideoTrack.items.map { it.id }
@@ -139,6 +152,7 @@ class AgentExecutor(
 
                 is AgentToolInvocation.GenerateCaptions -> {
                     val generated = StoryAnalyzer.generateCaptionsForTimeline(referenceProject, insights, tool.style)
+                        .map { CaptionTools.enrichCaption(it, applyPunctuation = true, highlightKeywords = true) }
                     if (generated.isNotEmpty()) {
                         commands += TimelineCommand.ReplaceCaptions(generated, byUser = false)
                         steps += AgentStep(tool.toolName, "Generated ${generated.size} synchronized caption(s)", true)
@@ -148,16 +162,44 @@ class AgentExecutor(
                 }
 
                 is AgentToolInvocation.EditCaption -> {
-                    val cap = CaptionItem(
-                        id = tool.captionId ?: UUID.randomUUID().toString(),
-                        startUs = secToUs(tool.startSec),
-                        endUs = secToUs(tool.endSec),
-                        text = tool.text,
-                        style = tool.style,
-                        editedByUser = false,
+                    val cap = CaptionTools.enrichCaption(
+                        CaptionItem(
+                            id = tool.captionId ?: UUID.randomUUID().toString(),
+                            startUs = secToUs(tool.startSec),
+                            endUs = secToUs(tool.endSec),
+                            text = tool.text,
+                            style = tool.style,
+                            editedByUser = false,
+                        ),
+                        applyPunctuation = false,
+                        highlightKeywords = true,
                     )
                     commands += TimelineCommand.AddOrUpdateCaption(cap, byUser = false)
-                    steps += AgentStep(tool.toolName, "Updated caption \"${tool.text.take(24)}\"", true)
+                    steps += AgentStep(tool.toolName, "Updated caption \"${cap.text.take(24)}\"", true)
+                }
+
+                is AgentToolInvocation.StyleCaptions -> {
+                    val existing = referenceProject.mainCaptionTrack.items
+                    if (existing.isEmpty()) {
+                        steps += AgentStep(tool.toolName, "No captions on track to style", true)
+                    } else {
+                        val styled = existing.map { c ->
+                            val updated = c.copy(
+                                style = tool.style ?: c.style,
+                                font = tool.font ?: c.font,
+                                fontSizeSp = tool.fontSizeSp ?: c.fontSizeSp,
+                                positionYFraction = tool.positionYFraction?.let(CaptionTools::clampSafeAreaY) ?: c.positionYFraction,
+                                animation = tool.animation ?: c.animation,
+                            )
+                            CaptionTools.enrichCaption(
+                                updated,
+                                applyPunctuation = tool.autoPunctuate,
+                                highlightKeywords = tool.highlightKeywords ?: updated.highlightKeywords.isNotEmpty(),
+                            )
+                        }
+                        commands += TimelineCommand.ReplaceCaptions(styled, byUser = false)
+                        steps += AgentStep(tool.toolName, "Styled ${styled.size} caption(s)", true)
+                    }
                 }
 
                 is AgentToolInvocation.SetTransition -> {
@@ -188,17 +230,153 @@ class AgentExecutor(
                     steps += AgentStep(tool.toolName, "Set speed ${tool.speed}x", true)
                 }
 
+                is AgentToolInvocation.SetEffects -> {
+                    val targets = if (tool.itemId != null) listOf(tool.itemId) else referenceProject.mainVideoTrack.items.map { it.id }
+                    targets.forEach { id ->
+                        commands += TimelineCommand.SetClipEffects(
+                            itemId = id,
+                            effects = tool.effects,
+                            byUser = false,
+                        )
+                    }
+                    steps += AgentStep(tool.toolName, "Applied shader effects to ${targets.size} clip(s)", true)
+                }
+
+                is AgentToolInvocation.AddKeyframe -> {
+                    commands += TimelineCommand.UpsertKeyframe(
+                        itemId = tool.itemId,
+                        keyframe = tool.keyframe,
+                        byUser = false,
+                    )
+                    steps += AgentStep(tool.toolName, "Added ${tool.keyframe.property.label} keyframe", true)
+                }
+
+                is AgentToolInvocation.AddOverlayClip -> {
+                    val item = VideoClipItem(
+                        sourceClipIndex = tool.sourceClipIndex,
+                        sourceUri = clipUris[tool.sourceClipIndex] ?: "",
+                        timelineStartUs = secToUs(tool.timelineStartSec),
+                        sourceStartUs = secToUs(tool.startSec),
+                        sourceEndUs = secToUs(tool.endSec),
+                        muted = true,
+                        overlayBounds = tool.bounds,
+                        why = "Overlay / PIP",
+                        editedByUser = false,
+                    )
+                    commands += TimelineCommand.AddVideoClip(
+                        item = item,
+                        trackId = "video_overlay",
+                        byUser = false,
+                    )
+                    steps += AgentStep(tool.toolName, "Added overlay clip #${tool.sourceClipIndex + 1} at ${round1(tool.timelineStartSec)}s", true)
+                }
+
+                is AgentToolInvocation.AddSfx -> {
+                    val sfx = SfxType.fromKey(tool.sfxType)
+                    val sfxItem = AudioClipItem(
+                        title = sfx.label,
+                        sourceUri = "sfx://${sfx.key}",
+                        trackType = AudioTrackType.SFX,
+                        timelineStartUs = secToUs(tool.timelineSec),
+                        durationUs = secToUs(sfx.durationSec),
+                        volume = tool.volume,
+                        fadeInUs = 10_000L,
+                        fadeOutUs = 50_000L,
+                        duckUnderSpeech = false,
+                        editedByUser = false,
+                    )
+                    commands += TimelineCommand.AddAudioItem(
+                        item = sfxItem,
+                        trackId = "audio_sfx",
+                        byUser = false,
+                    )
+                    steps += AgentStep(tool.toolName, "Added ${sfx.label} SFX at ${round1(tool.timelineSec)}s", true)
+                }
+
+                is AgentToolInvocation.TrimSilence -> {
+                    var trimmedCount = 0
+                    referenceProject.mainVideoTrack.items.forEach { item ->
+                        if (tool.clipIndex != null && item.sourceClipIndex != tool.clipIndex) return@forEach
+                        val silences = insights[item.sourceClipIndex]?.silenceSpans ?: return@forEach
+                        val srcStartSec = usToSec(item.sourceStartUs)
+                        val srcEndSec = usToSec(item.sourceEndUs)
+                        var newStart = srcStartSec
+                        var newEnd = srcEndSec
+                        silences.firstOrNull { srcStartSec in it.start..it.end }?.let { s ->
+                            if (s.end - newStart >= 0.45 && newEnd - s.end >= 0.4) {
+                                newStart = (s.end - 0.12).coerceAtLeast(srcStartSec)
+                            }
+                        }
+                        silences.lastOrNull { srcEndSec in it.start..it.end }?.let { s ->
+                            if (newEnd - s.start >= 0.45 && s.start - newStart >= 0.4) {
+                                newEnd = (s.start + 0.12).coerceAtMost(srcEndSec)
+                            }
+                        }
+                        if (newStart > srcStartSec + 0.08 || newEnd < srcEndSec - 0.08) {
+                            val maxSrcUs = metasByIdx[item.sourceClipIndex]?.durationSec?.let(::secToUs) ?: Long.MAX_VALUE
+                            commands += TimelineCommand.TrimVideoClip(
+                                itemId = item.id,
+                                newSourceStartUs = secToUs(newStart),
+                                newSourceEndUs = secToUs(newEnd),
+                                maxSourceDurationUs = maxSrcUs,
+                                byUser = false,
+                            )
+                            trimmedCount++
+                        }
+                    }
+                    steps += AgentStep(
+                        tool.toolName,
+                        if (trimmedCount > 0) "Trimmed trailing/leading silence on $trimmedCount clip(s)" else "No trimmable edge silences found",
+                        true,
+                    )
+                }
+
+                is AgentToolInvocation.SyncToBeats -> {
+                    val bpm = tool.bpm ?: referenceProject.mood.bpm.toDouble()
+                    val beatUs = ((60.0 / bpm) * 1_000_000.0).roundToLong().coerceAtLeast(250_000L)
+                    val totalUs = referenceProject.videoDurationUs.coerceAtLeast(1_000_000L)
+                    val markers = mutableListOf<Long>()
+                    var t = 0L
+                    while (t <= totalUs + beatUs) {
+                        markers += t
+                        t += beatUs
+                    }
+                    commands += TimelineCommand.SetBeatMarkers(markers, byUser = false)
+                    var snappedCount = 0
+                    val items = referenceProject.mainVideoTrack.items.sortedBy { it.timelineStartUs }
+                    items.dropLast(1).forEach { item ->
+                        val nearestBeat = markers.minByOrNull { abs(it - item.timelineEndUs) } ?: return@forEach
+                        val deltaUs = nearestBeat - item.timelineEndUs
+                        if (abs(deltaUs) in 40_000L..350_000L) {
+                            val newSrcEndUs = item.sourceEndUs + (deltaUs * item.effectiveSpeed).roundToLong()
+                            val maxSrcUs = metasByIdx[item.sourceClipIndex]?.durationSec?.let(::secToUs) ?: Long.MAX_VALUE
+                            if (newSrcEndUs - item.sourceStartUs >= 300_000L && newSrcEndUs <= maxSrcUs) {
+                                commands += TimelineCommand.TrimVideoClip(
+                                    itemId = item.id,
+                                    newSourceStartUs = item.sourceStartUs,
+                                    newSourceEndUs = newSrcEndUs,
+                                    maxSourceDurationUs = maxSrcUs,
+                                    byUser = false,
+                                )
+                                snappedCount++
+                            }
+                        }
+                    }
+                    steps += AgentStep(tool.toolName, "Synced cut markers at ${bpm.toInt()} BPM ($snappedCount cut(s) snapped)", true)
+                }
+
                 is AgentToolInvocation.ConfigureAudioMusic -> {
                     musicRequested = tool.musicOn
                     if (tool.musicQuery != null) musicQuery = tool.musicQuery
                     if (tool.musicVolume != null) musicVolume = tool.musicVolume
+                    val musicTrack = referenceProject.audioTracks.firstOrNull { it.type == AudioTrackType.MUSIC } ?: referenceProject.mainAudioTrack
                     if (!tool.musicOn) {
-                        referenceProject.mainAudioTrack.items.filter { it.trackType == AudioTrackType.MUSIC }.forEach {
-                            commands += TimelineCommand.DeleteAudioItem(it.id, byUser = false)
+                        musicTrack.items.filter { it.trackType == AudioTrackType.MUSIC }.forEach {
+                            commands += TimelineCommand.DeleteAudioItem(it.id, trackId = musicTrack.id, byUser = false)
                         }
                     } else if (tool.musicVolume != null) {
-                        referenceProject.mainAudioTrack.items.firstOrNull { it.trackType == AudioTrackType.MUSIC }?.let { existing ->
-                            commands += TimelineCommand.AddAudioItem(existing.copy(volume = tool.musicVolume, editedByUser = false), byUser = false)
+                        musicTrack.items.firstOrNull { it.trackType == AudioTrackType.MUSIC }?.let { existing ->
+                            commands += TimelineCommand.AddAudioItem(existing.copy(volume = tool.musicVolume, editedByUser = false), trackId = musicTrack.id, byUser = false)
                         }
                     }
                     if (tool.clipId != null && (tool.clipVolume != null || tool.clipMuted != null)) {
