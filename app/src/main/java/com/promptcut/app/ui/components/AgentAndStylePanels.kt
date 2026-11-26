@@ -148,6 +148,16 @@ fun AgentPanel(
             }
         }
 
+        // Music taste feedback is learned from the track the user actually chooses.
+        vm.musicTasteProfile?.let { profile ->
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Your music taste", style = MaterialTheme.typography.labelLarge)
+                    Text(profile, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
         // Manual-edit / destructive-change protection approval card
         vm.pendingManualEditReason?.let { reason ->
             OutlinedCard(
