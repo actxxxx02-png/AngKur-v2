@@ -962,9 +962,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun pickSong(uri: Uri) {
         viewModelScope.launch {
             status = "Listening to your song…"
-            runCatching {
-                ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             val name = EditorMediaHelper.displayName(ctx, uri)
             val s = EditorMediaHelper.analyzeSong(ctx, uri, name)
             if (s == null) { status = "Couldn't read that audio file. Try another song."; return@launch }
@@ -972,10 +970,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             musicSource = MusicSource.MY_SONG
             musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
             attachSongToTimeline(s)
-            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM)." else "Song ready."
+            status = if (s.tempo != null) "Song ready: ${name.substringBeforeLast('.')} (${s.tempo.bpm.toInt()} BPM). Your music taste profile has been updated." else "Song ready. Your music taste profile has been updated."
+            musicTasteProfile = buildMusicTasteProfile(s)
         }
     }
 
+    private fun buildMusicTasteProfile(s: Song): String {
+        val bpm = s.tempo?.bpm ?: 100.0
+        val tempoTaste = when { bpm < 75 -> "slow / emotional"; bpm < 100 -> "calm / relaxed"; bpm < 118 -> "mid-tempo / groove"; bpm < 138 -> "upbeat / energetic"; else -> "fast / high-energy" }
+        val dynamic = s.envelope?.let { values ->
+            if (values.isEmpty()) "unknown dynamics" else {
+                val mean = values.average()
+                val variance = values.map { (it - mean) * (it - mean) }.average()
+                if (variance > 0.03) "dynamic / changing intensity" else "steady intensity"
+            }
+        } ?: "unknown dynamics"
+        return "Taste learned from ${s.name}: $tempoTaste (${bpm.toInt()} BPM), $dynamic. Use tracks with a similar tempo and energy when suggesting music."
+    }
+
+    var musicTasteProfile by mutableStateOf<String?>(null)
+        private set
     fun searchLibrary(query: String? = null) {
         val q = (query ?: libQuery).ifBlank { MusicLibrary.defaultQuery(mood, occasion) }
         libQuery = q
@@ -1059,6 +1073,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------ AI Agent Editing + Render
 
     private fun styleRequest(extra: String): String = buildString {
+        referenceStyleNotes?.let { appendLine("REFERENCE VIDEO STYLE (do not use as source footage): $it") }
+        musicTasteProfile?.let { appendLine("USER MUSIC TASTE: $it") }
         append("Make a video. ")
         if (off.isNotEmpty()) append("Anything not stated here: decide yourself from the user's words and the footage. ")
         if (isOn(Opt.OCCASION)) append("Occasion: $occasion. ")
