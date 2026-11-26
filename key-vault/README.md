@@ -32,6 +32,7 @@ GitHub Pages can host static HTML but cannot run this private storage API. Verce
 - `GET /api/keys`: authenticated masked key list.
 - `GET /api/keys?sync=1`: authenticated raw keys for manual Android sync.
 - `PUT /api/keys` with `{ "action":"add", "providerId":"GEMINI|GROQ|CLAUDE", "name":"...", "key":"..." }`: add a key.
+- `PUT /api/keys` with `{ "action":"update", "id":"...", "name":"...", "key":"..." }`: replace a saved key and optionally rename it.
 - `PUT /api/keys` with `{ "action":"toggle", "id":"...", "enabled":true }`: enable or disable a key.
 - `DELETE /api/keys` with `{ "id":"..." }`: delete a key.
 
