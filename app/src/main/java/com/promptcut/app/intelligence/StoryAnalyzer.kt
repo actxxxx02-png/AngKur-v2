@@ -146,7 +146,7 @@ object StoryAnalyzer {
             val explicitAction = ins?.shots?.any { shot ->
                 shot.interest >= 3 && shot.labels.any { label ->
                     label.equals("Explosion", true) || label.equals("Fireworks", true) || label.equals("Sports", true)
-                })
+                }
             } == true
 
             // Only add a cue for unmistakable peaks. No automatic whoosh on ordinary transitions.
