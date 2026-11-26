@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -162,16 +164,61 @@ fun PreviewStage(
             when {
                 renderedOutput != null -> {
                     val player = remember { ExoPlayer.Builder(ctx).build() }
+                    val latestIsPlaying by rememberUpdatedState(isPlaying)
+                    val latestOnTogglePlay by rememberUpdatedState(onTogglePlay)
+                    val latestOnPlayheadChange by rememberUpdatedState(onPlayheadChange)
+
                     LaunchedEffect(renderedOutput.absolutePath) {
                         player.setMediaItem(MediaItem.fromUri(Uri.fromFile(renderedOutput)))
                         player.prepare()
-                        player.playWhenReady = true
+                        player.playWhenReady = latestIsPlaying
+                    }
+                    LaunchedEffect(isPlaying, renderedOutput.absolutePath) {
+                        if (isPlaying && player.playbackState == Player.STATE_ENDED) {
+                            player.seekTo(0L)
+                        }
+                        if (player.playWhenReady != isPlaying) {
+                            player.playWhenReady = isPlaying
+                        }
+                    }
+                    LaunchedEffect(isPlaying, renderedOutput.absolutePath) {
+                        if (isPlaying) {
+                            while (true) {
+                                delay(100L)
+                                latestOnPlayheadChange(player.currentPosition.coerceAtLeast(0L) * 1000L)
+                            }
+                        }
+                    }
+                    LaunchedEffect(playheadUs, isPlaying, renderedOutput.absolutePath) {
+                        if (!isPlaying && kotlin.math.abs(player.currentPosition.coerceAtLeast(0L) * 1000L - playheadUs) > 80_000L) {
+                            player.seekTo((playheadUs / 1000L).coerceAtLeast(0L))
+                        }
                     }
                     LaunchedEffect(previewSpeed, audioMonitorMuted) {
                         player.setPlaybackSpeed(previewSpeed)
                         player.volume = if (audioMonitorMuted) 0f else 1f
                     }
-                    DisposableEffect(Unit) { onDispose { player.release() } }
+                    DisposableEffect(player) {
+                        val listener = object : Player.Listener {
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                if (playbackState == Player.STATE_ENDED) {
+                                    latestOnPlayheadChange(0L)
+                                    if (latestIsPlaying) latestOnTogglePlay()
+                                }
+                            }
+
+                            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST && playWhenReady != latestIsPlaying) {
+                                    latestOnTogglePlay()
+                                }
+                            }
+                        }
+                        player.addListener(listener)
+                        onDispose {
+                            player.removeListener(listener)
+                            player.release()
+                        }
+                    }
                     AndroidView(
                         factory = {
                             PlayerView(it).apply {

@@ -715,6 +715,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
             status = "Reading clips…"
+            uris.forEach { uri ->
+                runCatching {
+                    ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            }
             val next = (clips.maxOfOrNull { it.meta.index } ?: -1) + 1
             val loaded = ClipAnalyzer.load(ctx, uris, next)
             clips += loaded
@@ -893,6 +898,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun pickSong(uri: Uri) {
         viewModelScope.launch {
             status = "Listening to your song…"
+            runCatching {
+                ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
             val name = EditorMediaHelper.displayName(ctx, uri)
             val s = EditorMediaHelper.analyzeSong(ctx, uri, name)
             if (s == null) { status = "Couldn't read that audio file. Try another song."; return@launch }
@@ -1421,9 +1429,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     missingAssetIndices.clear()
                     missingAssetIndices += loaded.missingAssetIndices
                     exportDiagnostics = ExportDiagnostics.fromJson(loaded.entity.lastExportDiagnosticsJson)
-                    val uris = loaded.assets.mapNotNull { a -> a.uriString.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } }
-                    if (uris.isNotEmpty()) {
-                        val reloaded = ClipAnalyzer.load(ctx, uris, 0)
+                    val reloaded = mutableListOf<Clip>()
+                    loaded.assets.forEach { asset ->
+                        val uri = asset.uriString.takeIf { it.isNotBlank() }?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                            ?: return@forEach
+                        val loadedOne = ClipAnalyzer.load(ctx, listOf(uri), asset.clipIndex).firstOrNull() ?: return@forEach
+                        val restoredCrop = ProjectRepository.parseCropJson(asset.cropJson)
+                        val mergedMeta = loadedOne.meta.copy(
+                            index = asset.clipIndex,
+                            description = asset.insightSummary.ifBlank { loadedOne.meta.description },
+                            crop = restoredCrop ?: loadedOne.meta.crop,
+                        )
+                        reloaded += Clip(loadedOne.uri, mergedMeta, loadedOne.thumbnail, loadedOne.isHdr)
+                    }
+                    if (reloaded.isNotEmpty()) {
                         clips += reloaded
                         reloaded.forEach { c ->
                             if (c.meta.hasAudio) {

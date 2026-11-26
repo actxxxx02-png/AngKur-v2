@@ -32,10 +32,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platform-tools,platforms;android-36,build-tools;36.0.0"
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -47,13 +49,14 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Validate Gradle wrapper
+      - name: Validate Gradle wrapper and tasks
         run: |
           test -f gradlew
           test -f gradle/wrapper/gradle-wrapper.properties
           test -f gradle/wrapper/gradle-wrapper.jar
           chmod +x gradlew
           ./gradlew --version --no-daemon
+          ./gradlew tasks --group=build --no-daemon
 
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace --no-daemon
@@ -88,36 +91,40 @@ jobs:
           else
             rm -f keystore.properties
             echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
-            echo "Release signing secrets not configured."
+            echo "Release signing secrets not configured; skipping release APK."
           fi
 
-      - name: Build Debug and Release APKs
-        run: |
-          ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Verify and prepare APKs
+      - name: Build Release APK (signed)
+        if: env.RELEASE_SIGNED == 'true'
+        run: ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Verify and prepare Debug APK
         run: |
           DEBUG_SRC="app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_SRC="app/build/outputs/apk/release/app-release.apk"
-
           test -s "$DEBUG_SRC"
-          test -s "$RELEASE_SRC"
-
           mkdir -p build/apk-deliverables
-
           cp "$DEBUG_SRC" build/apk-deliverables/PromptCut-debug.apk
-          cp "$RELEASE_SRC" build/apk-deliverables/PromptCut-release.apk
-
           DEBUG_BYTES=$(wc -c < build/apk-deliverables/PromptCut-debug.apk)
-          RELEASE_BYTES=$(wc -c < build/apk-deliverables/PromptCut-release.apk)
-
           DEBUG_SHA=$(sha256sum build/apk-deliverables/PromptCut-debug.apk | awk '{print $1}')
-          RELEASE_SHA=$(sha256sum build/apk-deliverables/PromptCut-release.apk | awk '{print $1}')
-
           {
             echo "DEBUG_BYTES=$DEBUG_BYTES"
-            echo "RELEASE_BYTES=$RELEASE_BYTES"
             echo "DEBUG_SHA=$DEBUG_SHA"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify and prepare Release APK
+        if: env.RELEASE_SIGNED == 'true'
+        run: |
+          RELEASE_SRC="app/build/outputs/apk/release/app-release.apk"
+          test -s "$RELEASE_SRC"
+          mkdir -p build/apk-deliverables
+          cp "$RELEASE_SRC" build/apk-deliverables/PromptCut-release.apk
+          RELEASE_BYTES=$(wc -c < build/apk-deliverables/PromptCut-release.apk)
+          RELEASE_SHA=$(sha256sum build/apk-deliverables/PromptCut-release.apk | awk '{print $1}')
+          {
+            echo "RELEASE_BYTES=$RELEASE_BYTES"
             echo "RELEASE_SHA=$RELEASE_SHA"
           } >> "$GITHUB_ENV"
 
@@ -144,6 +151,7 @@ jobs:
           retention-days: 14
 
       - name: Upload Release APK
+        if: env.RELEASE_SIGNED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: PromptCut-Release-APK
@@ -161,11 +169,15 @@ jobs:
             echo ""
             echo "- **Branch:** \`${GITHUB_REF_NAME}\`"
             echo "- **Commit:** \`${GITHUB_SHA}\`"
-            echo "- **Release signing configured:** ${RELEASE_SIGNED:-unknown}"
+            echo "- **Release signing configured:** ${RELEASE_SIGNED:-false}"
             echo ""
             echo "| APK | Size (bytes) | SHA-256 |"
             echo "|---|---:|---|"
             echo "| Debug | ${DEBUG_BYTES:-N/A} | \`${DEBUG_SHA:-N/A}\` |"
-            echo "| Release | ${RELEASE_BYTES:-N/A} | \`${RELEASE_SHA:-N/A}\` |"
+            if [ "${RELEASE_SIGNED:-false}" = "true" ]; then
+              echo "| Release | ${RELEASE_BYTES:-N/A} | \`${RELEASE_SHA:-N/A}\` |"
+            else
+              echo "| Release | Skipped (unsigned) | N/A |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           

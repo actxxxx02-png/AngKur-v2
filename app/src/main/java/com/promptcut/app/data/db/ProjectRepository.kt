@@ -485,11 +485,13 @@ class ProjectRepository(private val db: AppDatabase) {
         }.getOrDefault(emptyMap())
     }
 
-    private fun parseCropJson(raw: String?): CropBox? {
-        if (raw.isNullOrBlank()) return null
-        return runCatching {
-            val arr = JSONArray(raw)
-            if (arr.length() == 4) CropBox(arr.getDouble(0), arr.getDouble(1), arr.getDouble(2), arr.getDouble(3)).normalized() else null
-        }.getOrNull()
+    companion object {
+        internal fun parseCropJson(raw: String?): CropBox? {
+            if (raw.isNullOrBlank()) return null
+            return runCatching {
+                val arr = JSONArray(raw)
+                if (arr.length() == 4) CropBox(arr.getDouble(0), arr.getDouble(1), arr.getDouble(2), arr.getDouble(3)).normalized() else null
+            }.getOrNull()
+        }
     }
 }

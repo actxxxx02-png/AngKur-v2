@@ -32,12 +32,12 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -414,7 +414,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     onClick = { submit(input) },
                     modifier = Modifier.size(48.dp).testTag("agent_send_button"),
                 ) {
-                    Icon(Icons.Default.Send, contentDescription = "Send prompt")
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send prompt")
                 }
             }
         }

@@ -107,20 +107,26 @@ class WorkService : Service() {
         }
         try {
             ServiceCompat.startForeground(this, ID, build(this, intent?.getStringExtra("text") ?: "Working…", -1), type)
+            if (!running) {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+            }
         } catch (e: Exception) {
             running = false
-            stopSelf()
+            stopSelf(startId)
         }
         return START_NOT_STICKY
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         running = false
-        stopSelf()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
     }
 
     override fun onDestroy() {
         running = false
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
