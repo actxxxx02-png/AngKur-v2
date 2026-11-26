@@ -1074,21 +1074,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         syncFromEngine()
     }
 
-    private suspend fun autoPickSong(p: EditPlan): Song? {
-        val q = p.musicQuery.ifBlank { libQuery.ifBlank { MusicLibrary.defaultQuery(p.mood, occasion) } }
-        status = "Finding a free ${p.mood.label.lowercase()} song…"
-        val found = runCatching { MusicLibrary.search(q, p.totalSec + 2) }.getOrNull().orEmpty()
-            .ifEmpty { runCatching { MusicLibrary.search(MusicLibrary.defaultQuery(p.mood, occasion), p.totalSec + 2) }.getOrNull().orEmpty() }
-        if (found.isNotEmpty()) { libResults.clear(); libResults += found; libQuery = q }
-        for (t in found.take(3)) {
-            val s = runCatching { loadLibraryTrack(t) }.getOrNull()
-            if (s != null) {
-                musicWaveform = s.envelope?.let { VisualCache.downsample(it, 80) }
-                return s
-            }
-        }
-        return null
-    }
+    // Background scores are never selected silently. The user chooses a full song in the library.
 
     // ------------------------------------------------------------------ AI Agent Editing + Render
 
