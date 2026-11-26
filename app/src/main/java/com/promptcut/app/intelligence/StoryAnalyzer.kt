@@ -144,7 +144,7 @@ object StoryAnalyzer {
             }
             val highlight = ins?.highlights?.filter { it.score >= 4.5 }?.maxByOrNull { it.score }
             val explicitAction = ins?.shots?.any { shot ->
-                shot.interest >= 3 && (shot.motion > 28.0 || shot.labels.any { label ->
+                shot.interest >= 3 && shot.labels.any { label ->
                     label.equals("Explosion", true) || label.equals("Fireworks", true) || label.equals("Sports", true)
                 })
             } == true
