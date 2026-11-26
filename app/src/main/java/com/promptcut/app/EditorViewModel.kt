@@ -1271,10 +1271,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val currentProject = _timelineProject.value
         if (currentProject.mainVideoTrack.items.isEmpty()) return
 
-        if (musicSource == MusicSource.LIBRARY && libSong == null && currentProject.mainAudioTrack.items.isEmpty()) {
-            libSong = autoPickSong(currentProject.toEditPlan())
-            if (libSong == null) musicSource = MusicSource.MOOD
-        }
+        // Never inject a background score without the user's explicit choice.
+        // Preserve original clip audio unless a track has been deliberately selected.
+
         val songNow = when (musicSource) { MusicSource.MY_SONG -> song; MusicSource.LIBRARY -> libSong; else -> null }
         val music: MusicMux.Source? = when (musicSource) {
             MusicSource.ORIGINAL -> null
