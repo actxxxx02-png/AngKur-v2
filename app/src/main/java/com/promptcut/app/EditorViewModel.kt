@@ -129,6 +129,70 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var pendingPaidConsentError by mutableStateOf(false)
         private set
 
+    // Optional style-only reference. It is never added to the output timeline.
+    var referenceVideoUri by mutableStateOf<Uri?>(null)
+        private set
+    var referenceVideoName by mutableStateOf<String?>(null)
+        private set
+    var referenceStyleNotes by mutableStateOf<String?>(null)
+        private set
+
+    fun setReferenceVideo(uri: Uri) {
+        viewModelScope.launch {
+            runCatching { ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val name = EditorMediaHelper.displayName(ctx, uri)
+            referenceVideoUri = uri
+            referenceVideoName = name
+            referenceStyleNotes = null
+            status = "Studying example video style…"
+            val notes = withContext(Dispatchers.IO) {
+                runCatching {
+                    android.media.MediaMetadataRetriever().use { retriever ->
+                        retriever.setDataSource(ctx, uri)
+                        val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                        val duration = durationMs / 1000.0
+                        val count = (duration / 2.0).toInt().coerceIn(1, 24)
+                        val times = (0 until count).map { ((it + 0.5) * duration / count * 1_000_000).toLong() }
+                        val lumas = mutableListOf<Double>()
+                        val changes = mutableListOf<Double>()
+                        var previous: IntArray? = null
+                        times.forEach { time ->
+                            val bitmap = retriever.getScaledFrameAtTime(time, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 96, 96) ?: return@forEach
+                            val pixels = IntArray(bitmap.width * bitmap.height)
+                            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                            val sample = (0 until pixels.size step 12).map { px ->
+                                val color = pixels[px]
+                                (android.graphics.Color.red(color) * 0.299 + android.graphics.Color.green(color) * 0.587 + android.graphics.Color.blue(color) * 0.114).toInt()
+                            }.toIntArray()
+                            lumas += sample.average()
+                            previous?.let { old ->
+                                val n = minOf(old.size, sample.size).coerceAtLeast(1)
+                                changes += (0 until n).sumOf { kotlin.math.abs(old[it] - sample[it]).toDouble() } / n
+                            }
+                            previous = sample
+                            bitmap.recycle()
+                        }
+                        val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                        val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                        val avgChange = changes.average().takeIf { it.isFinite() } ?: 0.0
+                        val pace = when { avgChange > 32 -> "fast, high visual-change pacing"; avgChange > 18 -> "moderate pacing"; else -> "slow, steady pacing" }
+                        val brightness = lumas.average().takeIf { it.isFinite() } ?: 110.0
+                        val light = when { brightness < 75 -> "dark / low-key exposure"; brightness > 175 -> "bright / high-key exposure"; else -> "balanced exposure" }
+                        "Reference: $name. Duration ${String.format(java.util.Locale.US, "%.1f", duration)}s; ${width}x${height}. Rhythm: $pace. Exposure: $light. Match style, shot rhythm, framing energy and mood only. Never insert reference footage or copy its audio."
+                    }
+                }.getOrElse { "Reference selected: $name. Frame inspection was incomplete; use this only as style guidance and never insert the reference clip into the export." }
+            }
+            referenceStyleNotes = notes
+            status = "Example studied. Add your footage and generate an edit."
+        }
+    }
+
+    fun clearReferenceVideo() {
+        referenceVideoUri = null
+        referenceVideoName = null
+        referenceStyleNotes = null
+    }
+
     // Footage
     val clips = mutableStateListOf<Clip>()
     val insights = mutableStateMapOf<Int, ClipInsight>()
