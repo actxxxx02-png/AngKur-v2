@@ -128,8 +128,12 @@ fun EditorScreen(vm: EditorViewModel) {
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { vm.addClips(it) }
     val pickVideos = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
+    val referencePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { vm.setReferenceVideo(it) } }
+    val pickReferenceVideo = { referencePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
     val songPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.pickSong(it) } }
     val pickSong = { songPicker.launch(arrayOf("audio/*")) }
+    val musicLibraryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.pickSong(it) } }
+    val pickAnyMusic = { musicLibraryPicker.launch(arrayOf("audio/*", "application/ogg", "application/octet-stream")) }
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     LaunchedEffect(Unit) {
