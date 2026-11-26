@@ -393,6 +393,7 @@ fun LibraryPanel(vm: EditorViewModel) {
     DisposableEffect(Unit) { onDispose { player.release() } }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Preview a full song before selecting it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         vm.libSong?.let { s ->
             Text(
                 "Active track: ${s.name}" + (s.tempo?.let { " · ${it.bpm.toInt()} BPM" } ?: ""),
@@ -423,7 +424,7 @@ fun LibraryPanel(vm: EditorViewModel) {
                 TextButton(onClick = {
                     if (playingId == t.id) { player.stop(); playingId = null }
                     else { player.setMediaItem(MediaItem.fromUri(t.url)); player.prepare(); player.play(); playingId = t.id }
-                }) { Text(if (playingId == t.id) "Stop" else "Play") }
+                }) { Text(if (playingId == t.id) "Stop" else "Preview") }
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     Text(
@@ -435,7 +436,7 @@ fun LibraryPanel(vm: EditorViewModel) {
                 when {
                     vm.libLoadingId == t.id -> Text("Loading…", style = MaterialTheme.typography.labelSmall)
                     chosen -> Text("Selected", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    else -> TextButton(onClick = { player.stop(); playingId = null; vm.useLibraryTrack(t) }) { Text("Use") }
+                    else -> TextButton(onClick = { player.stop(); playingId = null; vm.useLibraryTrack(t) }) { Text("Use song") }
                 }
             }
         }
