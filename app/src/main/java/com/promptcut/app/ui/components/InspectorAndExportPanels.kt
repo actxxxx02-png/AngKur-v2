@@ -474,14 +474,18 @@ fun AudioStudioPanel(vm: EditorViewModel, onPickSong: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            MusicSource.MY_SONG -> Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    vm.song?.let { "${it.name}" + (it.tempo?.let { t -> " · ${t.bpm.toInt()} BPM" } ?: "") }
-                        ?: "No audio file picked yet",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f),
-                )
-                OutlinedButton(onClick = onPickSong) { Text(if (vm.song == null) "Choose File" else "Change") }
+            MusicSource.MY_SONG -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(vm.song?.let { "${it.name}" + (it.tempo?.let { t -> " · ${t.bpm.toInt()} BPM" } ?: "") } ?: "No song selected", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = onPickSong) { Text(if (vm.song == null) "Choose song" else "Change song") }
+                }
+                vm.song?.let { song ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { vm.auditionSong(song.uri) }, enabled = vm.selectedSongPreviewUri == null) { Text("Preview song") }
+                        TextButton(onClick = { vm.stopSongPreview() }, enabled = vm.selectedSongPreviewUri != null) { Text("Stop preview") }
+                    }
+                    Text("Preview plays the selected local song on this device. It does not change the export.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             MusicSource.ORIGINAL -> Text("Using original clip audio only.", style = MaterialTheme.typography.bodySmall)
         }
