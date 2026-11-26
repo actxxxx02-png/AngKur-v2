@@ -64,6 +64,69 @@ object ClipUnderstanding {
         val ocrText: String = "", val lumaDelta: Double = 0.0,
     )
 
+    suspend fun analyzeReference(
+        context: Context,
+        uri: android.net.Uri,
+        displayName: String,
+        onStep: (String) -> Unit = {},
+    ): String = withContext(Dispatchers.Default) {
+        val labeler = ImageLabeling.getClient(ImageLabelerOptions.Builder().setConfidenceThreshold(0.58f).build())
+        val faceDetector = FaceDetection.getClient(
+            FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL).setMinFaceSize(0.1f).build()
+        )
+        try {
+            MediaMetadataRetriever().use { retriever ->
+                retriever.setDataSource(context, uri)
+                val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val duration = durationMs / 1000.0
+                val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                val count = (duration / 1.5).toInt().coerceIn(1, 32)
+                val times = (0 until count).map { ((it + 0.5) * duration / count * 1_000_000).toLong() }
+                val allLabels = mutableListOf<String>()
+                var facesSeen = 0
+                var smilesSeen = 0
+                var previous: FloatArray? = null
+                val motion = mutableListOf<Double>()
+                val lumaValues = mutableListOf<Double>()
+                repeat(count) { index ->
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    val bitmap = retriever.getScaledFrameAtTime(times[index], MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 256, 256) ?: return@repeat
+                    val image = InputImage.fromBitmap(bitmap, 0)
+                    val labels = runCatching { Tasks.await(labeler.process(image)) }.getOrDefault(emptyList())
+                    allLabels += labels.filter { it.confidence >= 0.58f }.map { it.text }
+                    val faces = runCatching { Tasks.await(faceDetector.process(image)) }.getOrDefault(emptyList())
+                    facesSeen += faces.size
+                    if (faces.any { (it.smilingProbability ?: 0f) > 0.65f }) smilesSeen++
+                    val small = Bitmap.createScaledBitmap(bitmap, 48, 48, true)
+                    val pixels = IntArray(small.width * small.height)
+                    small.getPixels(pixels, 0, small.width, 0, 0, small.width, small.height)
+                    val gray = FloatArray(pixels.size)
+                    pixels.forEachIndexed { i, color -> gray[i] = Color.red(color) * 0.299f + Color.green(color) * 0.587f + Color.blue(color) * 0.114f }
+                    lumaValues += gray.average().toDouble()
+                    previous?.let { old -> motion += meanAbsDiff(old, gray) }
+                    previous = gray
+                    small.recycle()
+                    bitmap.recycle()
+                    onStep("Studying example video: ${index + 1}/$count")
+                }
+                val topLabels = allLabels.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.take(8).map { it.key }
+                val avgMotion = motion.average().takeIf { it.isFinite() } ?: 0.0
+                val avgLuma = lumaValues.average().takeIf { it.isFinite() } ?: 110.0
+                val pacing = when { avgMotion > 35 -> "high-energy / rapid visual changes"; avgMotion > 18 -> "moderate visual pace"; else -> "calm / steady visuals" }
+                val light = when { avgLuma < 75 -> "dark, moody exposure"; avgLuma > 175 -> "bright, high-key exposure"; else -> "balanced exposure" }
+                val aspect = if (width > 0 && height > 0) if (width.toFloat() / height > 1.15f) "landscape" else if (height.toFloat() / width > 1.15f) "portrait" else "square" else "unknown aspect"
+                val people = if (facesSeen > 0) "people/face content detected" else "no faces detected in sampled frames"
+                val smiles = if (smilesSeen > 0) "some smiling expressions detected" else "no clear smiling expressions detected"
+                "Reference style analysis for $displayName: ${"%.1f".format(java.util.Locale.US, duration)}s, $aspect (${width}x$height). Pacing: $pacing. Exposure: $light. Content labels: ${topLabels.joinToString(", ").ifBlank { "not identified" }}. $people; $smiles. Match the visual mood, content emphasis and edit rhythm only."
+            }
+        } finally {
+            labeler.close()
+            faceDetector.close()
+        }
+    }
+
     suspend fun analyze(
         context: Context,
         clip: Clip,
