@@ -132,6 +132,8 @@ fun EditorScreen(vm: EditorViewModel) {
     val pickReferenceVideo = { referencePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
     val songPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.pickSong(it) } }
     val pickSong = { songPicker.launch(arrayOf("audio/*")) }
+    val musicLibraryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.loadLibraryTrackForTaste(it) } }
+    val pickAnyMusic = { musicLibraryPicker.launch(arrayOf("audio/*", "application/ogg", "application/octet-stream")) }
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     LaunchedEffect(Unit) {
@@ -216,6 +218,17 @@ fun EditorScreen(vm: EditorViewModel) {
                 }
             }
             
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Music library", style = MaterialTheme.typography.labelLarge)
+                        Text("Choose audio from your device. PromptCut will analyse tempo and energy to learn your taste.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    OutlinedButton(onClick = pickAnyMusic) { Text("Browse music") }
+                }
+                vm.musicTasteProfile?.let { Text(it, Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp), style = MaterialTheme.typography.bodySmall) }
+            }
+
             // Reference video is style guidance only. It is never part of the export footage.
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
