@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#090909">
+<title>PromptCut · API Key Vault</title>
+<style>
+:root{color-scheme:dark;--bg:#090909;--panel:#111;--line:#282828;--muted:#929292;--fg:#f5f5f5;--white:#fff;--danger:#ff6868}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+main{width:min(760px,100%);margin:0 auto;padding:36px 20px 70px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:28px}.brand{font-size:13px;letter-spacing:.16em;font-weight:800}.tag{font-size:11px;color:#b7b7b7;border:1px solid var(--line);padding:5px 9px;border-radius:999px}
+h1{font-size:clamp(28px,6vw,42px);letter-spacing:-.05em;line-height:1.05;margin:0 0 10px}p{color:var(--muted);margin:0}.intro{margin-bottom:26px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:17px;padding:20px;margin:16px 0}.panel h2{font-size:16px;margin:0 0 4px}.sub{font-size:13px;margin-bottom:16px}
+label{display:block;font-size:12px;color:#c3c3c3;margin:13px 0 6px}input,select{width:100%;border:1px solid #383838;border-radius:10px;background:#090909;color:var(--fg);padding:12px 13px;font:inherit;outline:none}input:focus,select:focus{border-color:#aaa}
+button{cursor:pointer;border:1px solid #404040;border-radius:10px;background:#1b1b1b;color:var(--fg);font:600 13px inherit;padding:10px 13px}button.primary{background:#f2f2f2;color:#080808;border-color:#f2f2f2}button.danger{color:var(--danger)}button:disabled{opacity:.5;cursor:wait}
+.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:15px}.hidden{display:none!important}.note{font-size:12px;color:var(--muted);margin-top:12px}.status{font-size:13px;margin-top:12px;min-height:20px}.status.error{color:var(--danger)}.status.good{color:#b8e7c2}
+.key{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-top:1px solid var(--line)}.key:first-child{border-top:0}.key strong{display:block;font-size:14px}.key small{display:block;color:var(--muted);font-size:12px;margin-top:3px}.key-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:10px;letter-spacing:.08em;color:#bcbcbc;border:1px solid #383838;border-radius:999px;padding:3px 7px;margin-left:6px}
+.footer{font-size:11px;color:#717171;text-align:center;margin-top:24px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:520px){main{padding:25px 14px 48px}.panel{padding:16px}.grid{grid-template-columns:1fr}.key{align-items:flex-start;flex-direction:column}.key-actions{justify-content:flex-start}}
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><div class="brand">PROMPTCUT / VAULT</div><span class="tag">PRIVATE STORAGE</span></div>
+  <section class="intro"><h1>Your API keys<br>one place</h1><p>Manage Gemini, Groq and Claude keys. PromptCut downloads them only when you manually sync from the app.</p></section>
+
+  <section class="panel" id="loginPanel">
+    <h2>Unlock vault</h2><p class="sub">Enter your private vault password.</p>
+    <label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter password">
+    <div class="actions"><button class="primary" id="unlock">Unlock vault</button></div>
+    <div class="status" id="loginStatus" role="status"></div>
+  </section>
+
+  <div id="vault" class="hidden">
+    <section class="panel">
+      <h2>Add an API key</h2><p class="sub">Keys are encrypted before being stored in private Vercel Blob storage.</p>
+      <div class="grid"><div><label for="provider">Provider</label><select id="provider"><option value="GEMINI">Google Gemini</option><option value="GROQ">Groq</option><option value="CLAUDE">Anthropic Claude</option></select></div><div><label for="name">Key label</label><input id="name" maxlength="48" placeholder="Personal / Backup 1"></div></div>
+      <label for="apiKey">API key</label><input id="apiKey" type="password" autocomplete="off" placeholder="Paste API key">
+      <div class="actions"><button class="primary" id="save">Save key</button></div><div class="status" id="formStatus" role="status"></div>
+    </section>
+    <section class="panel">
+      <div class="top" style="margin:0 0 12px"><div><h2>Saved keys</h2><p class="sub" style="margin:3px 0 0">Secrets stay masked in this list.</p></div><button id="refresh">Refresh</button></div>
+      <div id="keys"><p>Loading…</p></div><div class="status" id="listStatus" role="status"></div>
+      <div class="actions"><button id="lock">Lock vault</button></div>
+    </section>
+  </div>
+  <div class="footer">PromptCut API Key Vault · Never share your vault password.</div>
+</main>
+<script>
+let password = '';
+const $ = (id) => document.getElementById(id);
+async function api(method, body, sync = false) {
+  const response = await fetch('/api/keys' + (sync ? '?sync=1' : ''), {
+    method, headers: {'Authorization':'Bearer ' + password, 'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined, cache:'no-store'
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Request failed (' + response.status + ')');
+  return data;
+}
+function say(id, message, type='') { $(id).textContent=message; $(id).className='status '+type; }
+function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function render(keys) {
+  if (!keys.length) { $('keys').innerHTML='<p>No keys saved yet.</p>'; return; }
+  const labels={GEMINI:'GEMINI',GROQ:'GROQ',CLAUDE:'CLAUDE'};
+  $('keys').innerHTML=keys.map(k=>'<div class="key"><div><strong>'+escapeHtml(k.name)+' <span class="pill">'+labels[k.providerId]+'</span></strong><small>'+escapeHtml(k.maskedKey)+' · '+(k.enabled?'Enabled':'Disabled')+(k.isPreferred?' · Preferred':'')+'</small></div><div class="key-actions"><button data-toggle="'+escapeHtml(k.id)+'" data-enabled="'+(!k.enabled)+'">'+(k.enabled?'Disable':'Enable')+'</button><button class="danger" data-delete="'+escapeHtml(k.id)+'">Delete</button></div></div>').join('');
+  $('keys').querySelectorAll('[data-toggle]').forEach(b=>b.onclick=async()=>{try{const r=await api('PUT',{action:'toggle',id:b.dataset.toggle,enabled:b.dataset.enabled==='true'});render(r.keys)}catch(e){say('listStatus',e.message,'error')}});
+  $('keys').querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this API key from the vault?'))return;try{const r=await api('DELETE',{id:b.dataset.delete});render(r.keys);say('listStatus','Key deleted.','good')}catch(e){say('listStatus',e.message,'error')}});
+}
+async function load() { const r=await api('GET');render(r.keys); }
+$('unlock').onclick=async()=>{password=$('password').value.trim();if(!password){say('loginStatus','Enter your vault password.','error');return}try{await load();$('loginPanel').classList.add('hidden');$('vault').classList.remove('hidden')}catch(e){password='';say('loginStatus',e.message,'error')}};
+$('password').addEventListener('keydown',e=>{if(e.key==='Enter')$('unlock').click()});
+$('save').onclick=async()=>{const key=$('apiKey').value.trim();if(key.length<8){say('formStatus','Paste a valid API key.','error');return}try{const r=await api('PUT',{action:'add',providerId:$('provider').value,name:$('name').value,key});render(r.keys);$('apiKey').value='';$('name').value='';say('formStatus','Key saved securely.','good')}catch(e){say('formStatus',e.message,'error')}};
+$('refresh').onclick=async()=>{try{await load();say('listStatus','Vault refreshed.','good')}catch(e){say('listStatus',e.message,'error')}};
+$('lock').onclick=()=>{password='';$('password').value='';$('vault').classList.add('hidden');$('loginPanel').classList.remove('hidden');$('keys').innerHTML='';say('loginStatus','Vault locked.','good')};
+</script>
+</body>
+</html>
